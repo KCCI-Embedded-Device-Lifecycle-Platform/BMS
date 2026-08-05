@@ -1,0 +1,111 @@
+/**
+ * @file    ntc.c
+ * @brief   NTC 10K B3950 온도 변환 (LUT + 선형보간, 부동소수점 미사용)
+ *
+ * @details 회로
+ *      3.3V ---[10k 풀업]---+---[NTC]--- GND
+ *                           |
+ *                          ADC
+ *
+ *      R_ntc = R_pullup * V_adc / (VDDA - V_adc)
+ *
+ * @note    왜 베타식(logf) 대신 LUT 인가?
+ *      1/T = 1/T0 + (1/B) * ln(R/R0) 를 그대로 쓰면 logf() 가 필요하다.
+ *      newlib 의 logf 는 수 KB 플래시를 잡아먹고, 500ms 마다 호출하기엔
+ *      연산 비용도 크다. 온도는 급변하지 않고 0.1도 분해능이면 충분하므로
+ *      5도 간격 LUT + 선형보간이 임베디드에서는 정석이다.
+ *      (오차 0.2도 이내, 연산은 비교/뺄셈/곱셈뿐)
+ */
+#include "ntc.h"
+#include "hw_adc.h"
+#include "dbg.h"
+
+#define NTC_CH_COUNT        2U
+#define NTC_LUT_SIZE        19U
+#define NTC_LUT_START_C10   (-100)      /* -10.0 C */
+#define NTC_LUT_STEP_C10    50          /*   5.0 C */
+
+/* 저항[ohm] : -10C 부터 +80C 까지 5도 간격 (B=3950, R25=10k) */
+static const uint16_t s_lut_ohm[NTC_LUT_SIZE] = {
+    58280, 44034, 33626, 25928, 20177,  /* -10 ~ 10 */
+    15840, 12537, 10000,  8037,  6507,  /*  15 ~ 35 */
+     5302,  4349,  3588,  2979,  2486,  /*  40 ~ 60 */
+     2086,  1760,  1492,  1270           /*  65 ~ 80 */
+};
+
+static const adc_idx_t s_ch[NTC_CH_COUNT] = { ADC_IDX_NTC1, ADC_IDX_NTC2 };
+static int32_t s_temp_c10[NTC_CH_COUNT];
+static int32_t s_res_ohm[NTC_CH_COUNT];
+
+/**
+ * @brief 저항 -> 온도(0.1C) 변환. LUT 는 저항 내림차순이다.
+ */
+static int32_t ntc_res_to_c10(int32_t r_ohm)
+{
+    uint8_t i;
+    int32_t r_hi, r_lo, t_lo;
+
+    if (r_ohm >= (int32_t)s_lut_ohm[0]) {
+        return NTC_LUT_START_C10;                       /* 범위 하한 클램프 */
+    }
+    if (r_ohm <= (int32_t)s_lut_ohm[NTC_LUT_SIZE - 1]) {
+        return NTC_LUT_START_C10 + (int32_t)(NTC_LUT_SIZE - 1) * NTC_LUT_STEP_C10;
+    }
+
+    for (i = 1; i < NTC_LUT_SIZE; i++) {
+        if (r_ohm > (int32_t)s_lut_ohm[i]) {
+            r_hi = (int32_t)s_lut_ohm[i - 1];           /* 저항 큰 쪽 = 온도 낮은 쪽 */
+            r_lo = (int32_t)s_lut_ohm[i];
+            t_lo = NTC_LUT_START_C10 + (int32_t)(i - 1) * NTC_LUT_STEP_C10;
+
+            /* 선형보간 : 저항이 r_hi->r_lo 로 줄어드는 만큼 온도가 5도 오른다 */
+            return t_lo + DIV_ROUND((r_hi - r_ohm) * NTC_LUT_STEP_C10, (r_hi - r_lo));
+        }
+    }
+    return NTC_TEMP_INVALID;
+}
+
+void ntc_init(void)
+{
+    uint8_t i;
+    for (i = 0; i < NTC_CH_COUNT; i++) {
+        s_temp_c10[i] = NTC_TEMP_INVALID;
+        s_res_ohm[i]  = 0;
+    }
+    DBG_I("ntc init (10k pullup, B3950 LUT)");
+}
+
+void ntc_update(void)
+{
+    uint8_t i;
+    int32_t v_mv, vdda_mv, r;
+
+    vdda_mv = hw_adc_get_vdda_mv();
+
+    for (i = 0; i < NTC_CH_COUNT; i++) {
+        v_mv = DIV_ROUND(hw_adc_raw_to_uv(hw_adc_get_raw(s_ch[i])), 1000L);
+
+        /* 개방(NTC 미연결) -> v ~ VDDA, 단락 -> v ~ 0 : 둘 다 오류로 처리 */
+        if ((v_mv <= 20) || (v_mv >= (vdda_mv - 20))) {
+            s_res_ohm[i]  = 0;
+            s_temp_c10[i] = NTC_TEMP_INVALID;
+            continue;
+        }
+
+        /* R_ntc = R_pull * V / (VDDA - V) */
+        r = DIV_ROUND(CFG_NTC_PULLUP_OHM * v_mv, (vdda_mv - v_mv));
+
+        s_res_ohm[i]  = r;
+        s_temp_c10[i] = ntc_res_to_c10(r);
+    }
+}
+
+int32_t ntc_get_temp_c10(uint8_t idx)
+{
+    return (idx < NTC_CH_COUNT) ? s_temp_c10[idx] : NTC_TEMP_INVALID;
+}
+
+int32_t ntc_get_res_ohm(uint8_t idx)
+{
+    return (idx < NTC_CH_COUNT) ? s_res_ohm[idx] : 0;
+}
