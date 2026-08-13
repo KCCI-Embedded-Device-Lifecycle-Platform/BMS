@@ -1,40 +1,21 @@
 /**
  * @file    oled.c
- * @brief   SSD1306 128x64 OLED 드라이버 (프레임버퍼 방식, I2C / SPI 공용)
+ * @brief   SSD1306 128x64 OLED 드라이버 (프레임버퍼 방식, I2C)
  *
- * @details SSD1306 GDDRAM 구조
- *      128x64 픽셀을 8개의 "페이지"로 나눈다. 한 페이지는 세로 8픽셀.
- *      한 바이트가 세로 8픽셀을 담당하며, LSB 가 위쪽이다.
+ * GDDRAM 은 128x64 를 8개 "페이지" 로 나눈다. 한 바이트가 세로 8픽셀(LSB 가 위)을 담당하므로
+ * 프레임버퍼는 128 x 8 = 1024 byte. F446RE(SRAM 128KB)에 부담이 없고, 직접 그리기보다
+ * I2C 트래픽이 적으며 화면 깜빡임(tearing)이 없다.
  *
- *          col0 col1 col2 ...          col127
- *  page0 [ b0 ][ b0 ][ b0 ] ...        <- 각 바이트의 bit0~bit7 이 y=0~7
- *  page1 [ b1 ][ b1 ][ b1 ] ...        <- y=8~15
- *   ...
- *  page7                               <- y=56~63
- *
- *      -> 프레임버퍼 크기 = 128 x 8 = 1024 byte
- *      F446RE 는 SRAM 128KB 이므로 1KB 버퍼는 부담 없다.
- *      직접 그리기(page 지정 후 즉시 전송)보다 I2C 트래픽이 적고
- *      화면 깜빡임(tearing)이 없다.
- *
- * @note  전송 경로는 CFG_OLED_IFACE 로 컴파일 타임에 갈린다.
- *        - I2C : [제어바이트][페이로드] 한 트랜잭션. 주소는 0x3C 또는 0x3D.
- *        - SPI : 제어바이트가 없고 DC 핀이 커맨드/데이터를 구분한다.
- *        프레임버퍼 / 폰트 / 그리기 코드는 두 경로가 그대로 공유한다.
- *
- *        컨트롤러가 SH1106 이면 CFG_OLED_COL_OFFSET 을 2 로 바꾼다.
- *        (화면이 좌우로 2픽셀 밀려 보이면 SH1106 이다)
+ * @note  I2C 전용이다 ([제어바이트][페이로드] 한 트랜잭션, 주소 0x3C, 모듈에 따라 0x3D).
+ *        SPI 경로는 삭제했다 — 최종 부품(ELB200168)이 I2C 4핀 전용이라 .ioc 에서 SPI2 를
+ *        내렸고, HAL_SPI_MODULE_ENABLED 조차 꺼져 코드만 복원하면 빌드가 깨진다.
+ *        대가로 팩 센서와 I2C1 을 공유하므로 flush 약 23ms 동안 센서 읽기가 밀린다
+ *        -> OLED 는 500ms 슬롯 전용이다.
+ *        화면이 좌우로 2픽셀 밀려 보이면 SH1106 이므로 CFG_OLED_COL_OFFSET 을 2 로 바꾼다.
  */
 #include "oled.h"
 #include "dbg.h"
-
-#if (CFG_OLED_IFACE == CFG_OLED_IFACE_SPI)
-  #include "hw_spi.h"
-  #include "hw_gpio.h"
-  #include "hw_tick.h"
-#else
-  #include "hw_i2c.h"
-#endif
+#include "hw_i2c.h"
 
 #define OLED_PAGES          (CFG_OLED_HEIGHT / 8U)
 #define OLED_FB_SIZE        (CFG_OLED_WIDTH * OLED_PAGES)
@@ -104,36 +85,8 @@ static const uint8_t s_init_cmd[] = {
 };
 
 /* ------------------------------------------------------------------
- *  전송 계층 : 여기만 인터페이스에 의존한다.
+ *  전송 계층 : 여기만 버스에 의존한다.
  * ------------------------------------------------------------------ */
-#if (CFG_OLED_IFACE == CFG_OLED_IFACE_SPI)
-
-static bool oled_tx(bool is_data, const uint8_t *p_data, uint16_t len)
-{
-    bool ok;
-
-    hw_gpio_set(HW_OUT_OLED_DC, is_data);   /* High = 데이터 / Low = 커맨드 */
-    hw_gpio_set(HW_OUT_OLED_CS, true);      /* 액티브 Low -> 물리적으로 Low */
-    ok = hw_spi_write(p_data, len);
-    hw_gpio_set(HW_OUT_OLED_CS, false);
-    return ok;
-}
-
-/* SPI 는 ACK 가 없어 존재 확인이 불가능하다. 하드웨어 리셋으로 대신한다. */
-static bool oled_bus_setup(void)
-{
-    if (!hw_spi_init()) {
-        return false;
-    }
-    hw_gpio_set(HW_OUT_OLED_RES, true);     /* RES Low = 리셋 */
-    hw_tick_delay(10);
-    hw_gpio_set(HW_OUT_OLED_RES, false);    /* 해제 후 안정화 대기 */
-    hw_tick_delay(10);
-    return true;
-}
-
-#else   /* CFG_OLED_IFACE_I2C */
-
 static bool oled_tx(bool is_data, const uint8_t *p_data, uint16_t len)
 {
     uint8_t tx[CFG_OLED_WIDTH + 1U];
@@ -154,8 +107,6 @@ static bool oled_bus_setup(void)
     }
     return true;
 }
-
-#endif
 
 static bool oled_cmd(uint8_t c)
 {
@@ -182,8 +133,7 @@ bool oled_init(void)
     s_ok = true;
     oled_clear();
     oled_flush();
-    DBG_I("OLED ok (SSD1306 128x64, %s)",
-          (CFG_OLED_IFACE == CFG_OLED_IFACE_SPI) ? "SPI2" : "I2C1");
+    DBG_I("OLED ok (SSD1306 128x64, I2C1 @0x%02X)", CFG_OLED_I2C_ADDR);
     return true;
 }
 

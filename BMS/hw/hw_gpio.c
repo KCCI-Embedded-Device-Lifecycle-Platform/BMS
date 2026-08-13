@@ -7,6 +7,14 @@
  */
 #include "hw_gpio.h"
 
+/* 릴레이 모듈은 제품마다 액티브 레벨이 갈린다 (저가 모듈 상당수가 액티브 Low).
+ * bms_cfg.h 를 HAL 심볼로부터 독립시키기 위해 1/0 스위치로 받고 여기서 변환한다. */
+#if (CFG_RELAY_ACTIVE_HIGH == 1)
+  #define RELAY_ACTIVE_LEVEL    GPIO_PIN_SET
+#else
+  #define RELAY_ACTIVE_LEVEL    GPIO_PIN_RESET
+#endif
+
 typedef struct {
     GPIO_TypeDef *port;
     uint16_t      pin;
@@ -14,12 +22,10 @@ typedef struct {
 } hw_pin_map_t;
 
 static const hw_pin_map_t s_map[HW_OUT_MAX] = {
-    /* HW_OUT_LED_RUN   */ { GPIOA, GPIO_PIN_5,  GPIO_PIN_SET   },
-    /* HW_OUT_LED_FAULT */ { GPIOC, GPIO_PIN_8,  GPIO_PIN_SET   },
-    /* HW_OUT_BUZZER    */ { GPIOC, GPIO_PIN_9,  GPIO_PIN_SET   },
-    /* HW_OUT_OLED_CS   */ { GPIOB, GPIO_PIN_12, GPIO_PIN_RESET },
-    /* HW_OUT_OLED_DC   */ { GPIOC, GPIO_PIN_7,  GPIO_PIN_SET   },
-    /* HW_OUT_OLED_RES  */ { GPIOC, GPIO_PIN_6,  GPIO_PIN_RESET },
+    /* HW_OUT_LED_RUN   */ { GPIOA, GPIO_PIN_5, GPIO_PIN_SET       },
+    /* HW_OUT_LED_FAULT */ { GPIOC, GPIO_PIN_8, GPIO_PIN_SET       },
+    /* HW_OUT_BUZZER    */ { GPIOC, GPIO_PIN_9, GPIO_PIN_SET       },
+    /* HW_OUT_RELAY_CHG */ { GPIOA, GPIO_PIN_8, RELAY_ACTIVE_LEVEL },
 };
 
 void hw_gpio_init(void)

@@ -1,10 +1,8 @@
 /**
  * @file    status_led.c
  * @brief   상태별 LED 블링크 패턴 + 부저
- * @note    보드에 UART 를 못 물릴 상황(시연장)에서도
- *          LED 패턴만 보고 BMS 상태를 알 수 있게 한다.
- *          패턴은 16bit 비트맵 = 100ms x 16 = 1.6초 주기.
- *          1 이면 점등. 테이블만 바꾸면 패턴을 바꿀 수 있다.
+ * @note    UART 를 못 물리는 상황(시연장)에서도 LED 패턴만으로 상태를 알 수 있게 한다.
+ *          패턴은 16bit 비트맵(100ms x 16 = 1.6초 주기), 1 이면 점등.
  */
 #include "status_led.h"
 #include "hw_gpio.h"
@@ -42,8 +40,7 @@ void status_led_update(void)
     on = ((s_pattern[s_state] >> s_phase) & 0x1U) != 0U;
 
     if (s_state == BMS_ST_FAULT) {
-        /* Fault LED 는 PC8 = 외부 배선이 필요한 핀이다.
-         * 외부 LED 를 안 달았으면 FAULT 가 눈에 전혀 안 보이므로,
+        /* Fault LED(PC8)는 외부 배선이 필요하다. 안 달았으면 FAULT 가 안 보이므로
          * CFG_FAULT_LED_MIRROR_LD2 로 온보드 LD2(PA5)에도 같이 낸다. */
 #if (CFG_FAULT_LED_MIRROR_LD2 == 1)
         hw_gpio_set(HW_OUT_LED_RUN,   on);

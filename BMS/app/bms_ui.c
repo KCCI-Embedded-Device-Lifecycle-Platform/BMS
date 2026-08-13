@@ -1,8 +1,8 @@
 /**
  * @file    bms_ui.c
  * @brief   OLED 로컬 상태 표시
- * @note    128x64 / 5x7 폰트 -> 가로 21자, 세로 8줄
- *          I2C 트래픽(1KB x 8kHz)을 아끼기 위해 500ms 주기로만 갱신한다.
+ * @note    128x64 / 5x7 폰트 -> 가로 21자, 세로 8줄.
+ *          I2C 트래픽을 아끼려고 500ms 주기로만 갱신한다.
  */
 #include "bms_ui.h"
 #include "bms_state.h"
@@ -27,9 +27,11 @@ void bms_ui_update(const bms_data_t *p_d)
 
     oled_clear();
 
-    /* 0행 : 상태 + 충전허가 */
-    oled_printf(0, 0, "%-8s  PERMIT:%d",
-                bms_fsm_state_name(p_d->state), (int)p_d->charge_permit);
+    /* 0행 : 상태 + permit + 릴레이 지령을 나란히.
+     * 둘이 다르면 EVSE 요청이 없거나 FSM 이 충전 구간에 없다는 뜻이다. */
+    oled_printf(0, 0, "%-8s P:%d R:%d",
+                bms_fsm_state_name(p_d->state),
+                (int)p_d->charge_permit, (int)p_d->relay_on);
 
     /* 1~2행 : 셀 전압 4개 (2개씩) */
     oled_printf(0, 1, "C1 %ld.%03ld  C2 %ld.%03ld",

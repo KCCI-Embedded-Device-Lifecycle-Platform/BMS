@@ -2,30 +2,16 @@
  * @file    bms_state.c
  * @brief   BMS 상태머신
  *
- * @details 상태 천이도
+ *   [INIT] -> [SELF_CHECK] -> 센서 정상 -> [IDLE]
+ *                          -> 센서 이상 -> [FAULT]
+ *   [IDLE]         -> permit && link_ok && EVSE 충전 요청 -> [CHARGE_READY]
+ *   [CHARGE_READY] -> 충전 전류 감지 -> [CHARGING]   / 요청 취소·링크 끊김 -> [IDLE]
+ *   [CHARGING]     -> 요청 취소 또는 전류 소멸 -> [IDLE]
+ *   어느 상태든 critical Fault -> [FAULT],  Fault 전부 해제 -> [IDLE]
  *
- *      [INIT] --초기화 완료--> [SELF_CHECK]
- *
- *      [SELF_CHECK] --센서 정상--> [IDLE]
- *                   --센서 이상--> [FAULT]
- *
- *      [IDLE] --permit=1 && EVSE 연결--> [CHARGE_READY]
- *             --Fault--------------------> [FAULT]
- *
- *      [CHARGE_READY] --충전 전류 감지--> [CHARGING]
- *                     --Fault----------> [FAULT]
- *                     --EVSE 이탈-------> [IDLE]
- *
- *      [CHARGING] --전류 소멸--> [IDLE]
- *                 --Fault-----> [FAULT]
- *
- *      [FAULT] --Fault 전부 해제--> [IDLE]
- *
- * @note  핵심 안전 원칙
- *      charge_permit 는 FAULT 상태로 들어가는 순간 "무조건" 0 이다.
- *      상태 진입 액션(entry action)에서 강제로 0 을 쓰기 때문에,
- *      Fault 판단 로직에 버그가 있어도 FSM 이 한 번 더 막는다.
- *      (안전 로직은 한 곳에만 두지 않는다)
+ * charge_permit 는 FAULT 진입 순간 무조건 0 이다 (entry action 에서 강제).
+ * Fault 판단 로직에 버그가 있어도 FSM 이 한 번 더 막는다 —
+ * 안전 로직은 한 곳에만 두지 않는다.
  */
 #include "bms_state.h"
 #include "bms_fault.h"
@@ -78,6 +64,11 @@ void bms_fsm_run(bms_data_t *p_d)
     bool critical = ((p_d->fault & BMS_FLT_CRITICAL_MASK) != 0U);
     bool link_ok  = ((p_d->fault & BMS_FLT_LINK_TIMEOUT) == 0U);
 
+    /* 하트비트가 온다는 것과 충전을 요청했다는 것은 다른 사실이다.
+     * link_ok 만 보면 EVSE 가 "충전 안 함(0x201=0)" 을 보내는 동안에도 permit=1 을 뿌린다.
+     * E-Stop 은 그 위에서 무조건 이긴다. */
+    bool evse_wants_charge = p_d->evse_charge_req && !p_d->evse_estop;
+
     switch (s_state) {
 
     case BMS_ST_INIT:
@@ -108,7 +99,7 @@ void bms_fsm_run(bms_data_t *p_d)
     case BMS_ST_IDLE:
         if (critical) {
             fsm_enter(p_d, BMS_ST_FAULT);
-        } else if (p_d->charge_permit && link_ok) {
+        } else if (p_d->charge_permit && link_ok && evse_wants_charge) {
             fsm_enter(p_d, BMS_ST_CHARGE_READY);
         }
         break;
@@ -118,7 +109,7 @@ void bms_fsm_run(bms_data_t *p_d)
             fsm_enter(p_d, BMS_ST_FAULT);
         } else if (p_d->pack_ma > CHARGE_DETECT_MA) {
             fsm_enter(p_d, BMS_ST_CHARGING);
-        } else if (!link_ok) {
+        } else if (!link_ok || !evse_wants_charge) {
             fsm_enter(p_d, BMS_ST_IDLE);
         }
         break;
@@ -126,6 +117,10 @@ void bms_fsm_run(bms_data_t *p_d)
     case BMS_ST_CHARGING:
         if (critical) {
             fsm_enter(p_d, BMS_ST_FAULT);
+        } else if (!evse_wants_charge) {
+            /* 중지 요청 또는 비상정지. 전류가 남아 있어도 즉시 IDLE 로 내려간다 —
+             * CHARGE_STOP_MA 아래로 떨어지기를 기다리면 그동안 릴레이가 붙어 있게 된다. */
+            fsm_enter(p_d, BMS_ST_IDLE);
         } else if (p_d->pack_ma < CHARGE_STOP_MA) {
             fsm_enter(p_d, BMS_ST_IDLE);
         }

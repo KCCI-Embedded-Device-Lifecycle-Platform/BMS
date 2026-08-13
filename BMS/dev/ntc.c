@@ -2,19 +2,14 @@
  * @file    ntc.c
  * @brief   NTC 10K B3950 온도 변환 (LUT + 선형보간, 부동소수점 미사용)
  *
- * @details 회로
- *      3.3V ---[10k 풀업]---+---[NTC]--- GND
+ *      3.3V ---[10k 풀업]---+---[NTC]--- GND      R_ntc = R_pull * V / (VDDA - V)
  *                           |
  *                          ADC
  *
- *      R_ntc = R_pullup * V_adc / (VDDA - V_adc)
- *
- * @note    왜 베타식(logf) 대신 LUT 인가?
- *      1/T = 1/T0 + (1/B) * ln(R/R0) 를 그대로 쓰면 logf() 가 필요하다.
- *      newlib 의 logf 는 수 KB 플래시를 잡아먹고, 500ms 마다 호출하기엔
- *      연산 비용도 크다. 온도는 급변하지 않고 0.1도 분해능이면 충분하므로
- *      5도 간격 LUT + 선형보간이 임베디드에서는 정석이다.
- *      (오차 0.2도 이내, 연산은 비교/뺄셈/곱셈뿐)
+ * @note    베타식 대신 LUT 를 쓰는 이유: 1/T = 1/T0 + (1/B)ln(R/R0) 은 logf() 가 필요한데
+ *      newlib 의 logf 는 수 KB 플래시를 잡아먹고 연산도 무겁다. 온도는 급변하지 않고
+ *      0.1도 분해능이면 충분하므로 5도 간격 LUT + 선형보간으로 충분하다
+ *      (오차 0.2도 이내, 연산은 비교/뺄셈/곱셈뿐).
  */
 #include "ntc.h"
 #include "hw_adc.h"

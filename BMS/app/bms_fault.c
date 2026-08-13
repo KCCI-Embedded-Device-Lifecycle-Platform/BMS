@@ -1,21 +1,13 @@
 /**
  * @file    bms_fault.c
- * @brief   Fault 판단 (진입 즉시 / 해제 지연 = 비대칭 설계)
+ * @brief   Fault 판단 — 진입은 빠르게, 해제는 느리게 (비대칭)
  *
- * @details 설계 원칙
- *   "안전이 확실할 때만 열고, 불확실하면 기본 닫힘(default closed)"
- *
- *   1) 진입 : 임계 초과가 CONFIRM_CNT(3회 = 300ms) 연속되면 Fault 확정.
- *      1회만 보고 바로 확정하면 ADC 노이즈 1회에 충전이 끊긴다.
- *      3회 연속을 요구하되, 요구 사양(100ms 내 반영)을 만족하도록
- *      데모에서는 1회로 낮출 수 있게 상수화했다.
- *
- *   2) 해제 : 히스테리시스 밴드 아래로 내려간 뒤
- *      CFG_FAULT_CLEAR_HOLD_MS(3초) 유지되어야 해제.
- *      임계 근처에서 Fault 가 on/off 를 반복하는 채터링(chattering)을 막는다.
- *
- *      예) OV 진입 4200mV / 해제 4150mV
- *          -> 4195~4205mV 를 오가도 한 번 걸린 Fault 는 유지된다.
+ * 원칙: 안전이 확실할 때만 열고, 불확실하면 닫는다(default closed).
+ *   진입 : 임계 초과가 CONFIRM_CNT(3회=300ms) 연속되어야 확정. ADC 노이즈 1회로
+ *          충전이 끊기는 것을 막는다.
+ *   해제 : 히스테리시스 밴드 아래로 내려간 뒤 CLEAR_HOLD_MS(3초) 유지되어야 해제.
+ *          임계 근처에서 on/off 를 반복하는 채터링을 막는다.
+ *          (예: OV 진입 4200 / 해제 4150 -> 4195~4205 를 오가도 Fault 는 유지)
  */
 #include "bms_fault.h"
 #include "hw_tick.h"
@@ -33,15 +25,14 @@ static fault_ctx_t s_ctx[8];        /* 비트 위치별 컨텍스트 */
 static uint32_t    s_link_last_ms;
 static uint16_t    s_prev_fault;
 
-/* 과온 임계만 런타임 변경 대상이다 (CAN 0x205).
- * 매크로가 아니라 변수여야 원격에서 바꿀 수 있으므로 RAM 으로 승격한다.
+/* 과온 임계만 런타임 변경 대상(CAN 0x205)이라 RAM 으로 승격한다.
  * 나머지 임계값은 여전히 컴파일 타임 상수다. */
 static int32_t     s_th_over_temp_c10     = CFG_OVER_TEMP_C10;
 static int32_t     s_th_over_temp_clr_c10 = CFG_OVER_TEMP_CLR_C10;
 
 /**
  * @brief  개별 Fault 상태 갱신
- * @param  bit_pos : s_ctx 인덱스
+ * @param  bit_pos    : s_ctx 인덱스
  * @param  set_cond   : 진입 조건 (true 면 이상)
  * @param  clear_cond : 해제 조건 (true 면 정상 복귀 가능)
  * @param  hold_ms    : 해제 조건을 유지해야 하는 시간
@@ -54,7 +45,7 @@ static void fault_eval(uint8_t bit_pos, bool set_cond, bool clear_cond,
     fault_ctx_t *c = &s_ctx[bit_pos];
 
     if (FLAG_IS_SET(*p_flt, mask)) {
-        /* --- 이미 Fault 상태 : 해제 판단 --- */
+        /* --- Fault 중 : 해제 판단 --- */
         if (clear_cond) {
             if (!c->clear_wait) {
                 c->clear_wait  = true;
@@ -68,7 +59,7 @@ static void fault_eval(uint8_t bit_pos, bool set_cond, bool clear_cond,
             c->clear_wait = false;      /* 다시 초과 -> 대기 리셋 */
         }
     } else {
-        /* --- 정상 상태 : 진입 판단 --- */
+        /* --- 정상 : 진입 판단 --- */
         if (set_cond) {
             if (c->cnt < FAULT_CONFIRM_CNT) {
                 c->cnt++;
@@ -104,10 +95,8 @@ int32_t bms_fault_get_ot_threshold(void)
  * @brief  과온 임계 원격 변경 (CAN 0x205)
  * @param  c10 : 요청 임계값 [0.1C]
  * @retval 실제로 적용된 값 [0.1C]
- * @note   원격 명령이 배터리 보호를 무력화하지 못하도록 하드코딩된
- *         안전 범위로 강제 클램프한다. 요청값을 그대로 반영하지 않고
- *         "적용된 값"을 돌려주므로, 상위 노드는 응답만 보고
- *         클램프가 걸렸는지 알 수 있다.
+ * @note   원격 명령이 배터리 보호를 무력화하지 못하도록 안전 범위로 강제 클램프한다.
+ *         "적용된 값" 을 돌려주므로 상위 노드는 응답만 보고 클램프를 알 수 있다.
  */
 int32_t bms_fault_set_ot_threshold(int32_t c10)
 {
@@ -151,24 +140,22 @@ void bms_fault_check(bms_data_t *p_d)
                       CFG_FAULT_CLEAR_HOLD_MS, &flt, BMS_FLT_OVER_CURRENT);
     }
 
-    /* ---------- 4) 과온 ---------- */
+    /* ---------- 4) 과온 (매크로가 아닌 변수 -> 0x205 로 런타임 변경 가능) ---------- */
     if (p_d->temp_c10 != BMS_TEMP_INVALID) {
-        /* 매크로가 아니라 변수를 쓴다 -> CAN 0x205 로 런타임 변경 가능 */
         fault_eval(4, (p_d->temp_c10 > s_th_over_temp_c10),
                       (p_d->temp_c10 < s_th_over_temp_clr_c10),
                       CFG_FAULT_CLEAR_HOLD_MS, &flt, BMS_FLT_OVER_TEMP);
     }
 
-    /* ---------- 5) 센서 크로스체크 ---------- */
+    /* ---------- 5) 센서 크로스체크 (션트 vs 홀) ---------- */
     diff = ABS_DIFF(p_d->pack_ma, p_d->acs_ma);
     fault_eval(5, (!p_d->sensor_ready) || (diff > CFG_SENSOR_DIFF_MA),
                   (p_d->sensor_ready)  && (diff < (CFG_SENSOR_DIFF_MA / 2)),
                   CFG_FAULT_CLEAR_HOLD_MS, &flt, BMS_FLT_SENSOR_ERR);
 
     /* ---------- 6) 통신 두절 ----------
-     * 해제 대기는 전용 상수를 쓴다. 하트비트 1회의 유효기간이
-     * CFG_LINK_TIMEOUT_MS(1초)뿐이라, 공용 3초를 쓰면 해제 조건이
-     * 3초 연속 성립하는 일이 없어 LINK_TIMEOUT 이 영구히 남는다. */
+     * 해제 대기는 전용 상수를 쓴다. 하트비트 1회의 유효기간이 1초뿐이라 공용 3초를 쓰면
+     * 해제 조건이 3초 연속 성립할 일이 없어 LINK_TIMEOUT 이 영구히 남는다. */
     {
         bool to = hw_tick_elapsed(s_link_last_ms, CFG_LINK_TIMEOUT_MS);
         fault_eval(6, to, !to, CFG_LINK_CLEAR_HOLD_MS, &flt, BMS_FLT_LINK_TIMEOUT);
@@ -186,9 +173,8 @@ void bms_fault_check(bms_data_t *p_d)
     p_d->charge_permit = ((flt & BMS_FLT_CRITICAL_MASK) == 0U);
 
     if (flt != s_prev_fault) {
-        /* "무엇이 새로 걸렸고 무엇이 풀렸는지"를 찍는다.
-         * 최상위 1개 이름(bms_fault_name(flt))만 찍으면
-         * 방금 추가된 비트가 우선순위에 밀려 로그에 안 보인다. */
+        /* 최상위 1개만 찍으면 방금 추가된 비트가 우선순위에 밀려 안 보인다.
+         * 그래서 새로 걸린 것(set)과 풀린 것(clr)을 나눠서 찍는다. */
         uint16_t rise = (uint16_t)(flt & (uint16_t)~s_prev_fault);
         uint16_t fall = (uint16_t)(s_prev_fault & (uint16_t)~flt);
 

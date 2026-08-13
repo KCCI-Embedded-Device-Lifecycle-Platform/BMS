@@ -2,21 +2,15 @@
  * @file    hw_adc.c
  * @brief   ADC1 + DMA2_Stream0 (Circular, Scan, Continuous) 드라이버
  *
- * @details 동작 원리
- *   1) ADC 가 Scan/Continuous 모드로 8개 랭크를 쉬지 않고 순환 변환한다.
- *   2) DMA 가 Circular 모드로 결과를 s_dma_buf[] 에 자동 갱신한다.
- *      -> CPU 개입 없이 데이터가 항상 최신으로 유지된다.
- *   3) 한 스캔이 끝날 때마다 TC 인터럽트가 발생하고,
- *      ISR 은 "덧셈 8회"만 수행하여 누적기에 더한다. (ISR 최소 연산 원칙)
- *   4) CFG_ADC_OVERSAMPLE_N(16) 회 누적되면 평균을 확정한다.
- *      STM32F4 는 하드웨어 오버샘플링이 없으므로 소프트웨어로 구현.
- *      16회 평균 -> 랜덤 노이즈가 1/4 로 감소 (SNR +12dB, 유효 2bit 증가)
+ * ADC 가 Scan/Continuous 로 8랭크를 계속 돌고 DMA(Circular)가 s_dma_buf[] 를 자동 갱신한다.
+ * 스캔이 끝날 때마다 TC 인터럽트가 뜨고, ISR 은 덧셈 8회만 해서 누적기에 더한다
+ * (ISR 최소 연산 원칙). CFG_ADC_OVERSAMPLE_N(16)회 누적되면 평균을 확정한다 —
+ * STM32F4 에는 하드웨어 오버샘플링이 없어 소프트웨어로 구현한 것이고,
+ * 16회 평균이면 랜덤 노이즈가 1/4 로 줄어든다 (유효 2bit 증가).
  *
- * @note    변환 시간 계산
- *          ADCCLK = PCLK2(84MHz) / 8 = 10.5MHz
- *          채널당 = (480 sampling + 12 conversion) / 10.5MHz = 46.9us
- *          1 스캔  = 46.9us x 8 = 375us  -> ISR 주기 약 2.7kHz
- *          평균 갱신 주기 = 375us x 16 = 6ms (100ms 태스크에 충분)
+ * @note    타이밍: ADCCLK = PCLK2(84MHz)/8 = 10.5MHz
+ *          채널당 (480+12)/10.5MHz = 46.9us -> 1스캔 375us -> 평균 갱신 6ms.
+ *          100ms 태스크에 충분하다.
  */
 #include "hw_adc.h"
 #include "dbg.h"
@@ -43,21 +37,15 @@ bool hw_adc_init(void)
     s_acc_cnt = 0;
     s_ready   = false;
 
-    /* 내부 참조전압 채널은 ADC_CCR 의 TSVREFE 비트로 별도 인에이블이 필요하다.
-     * CubeMX 에서 Vrefint 를 랭크에 추가하면 자동으로 켜지지만,
-     * 명시적으로 한 번 더 보장한다. */
+    /* Vrefint 채널은 ADC_CCR 의 TSVREFE 로 별도 인에이블이 필요하다.
+     * CubeMX 가 켜 주지만 명시적으로 한 번 더 보장한다. */
     ADC->CCR |= ADC_CCR_TSVREFE;
 
-    /* --- DDS(DMA Disable Selection) 강제 --- *
-     * CR2 의 DDS 가 0 이면 "시퀀스 마지막 변환 이후로는 DMA 요청을 내지
-     * 않는다". Circular DMA 라도 첫 8채널 스캔 한 번만 전송되고 멈춰서
-     * TC 콜백이 딱 1회 뜨고 끝난다. -> s_acc_cnt 가 16 에 도달하지 못해
-     * hw_adc_is_ready() 가 영원히 false 가 된다.
-     *
-     * CubeMX 의 ADC1 설정에 "DMA Continuous Requests = Enabled" 를 켜면
-     * adc.c 가 올바르게 생성되지만, 그 체크박스가 꺼진 채로 재생성되면
-     * 조용히 다시 깨진다. 재생성에 영향받지 않도록 여기서 못을 박는다.
-     * (핸들과 레지스터를 함께 맞춰 둬야 이후 HAL_ADC_Init 재호출에도 안전) */
+    /* --- DDS 강제 ---
+     * DDS 가 0 이면 시퀀스 마지막 변환 이후 DMA 요청을 내지 않아, Circular 라도 첫 스캔
+     * 한 번만 전송되고 멈춘다 -> TC 콜백이 1회만 떠서 hw_adc_is_ready() 가 영원히 false.
+     * CubeMX 의 "DMA Continuous Requests" 체크박스가 꺼진 채로 재생성되면 조용히 다시
+     * 깨지므로, 재생성에 영향받지 않도록 여기서 핸들과 레지스터를 함께 못 박는다. */
     hadc1.Init.DMAContinuousRequests = ENABLE;
     SET_BIT(hadc1.Instance->CR2, ADC_CR2_DDS);
 
@@ -97,11 +85,9 @@ uint16_t hw_adc_get_raw(adc_idx_t idx)
 
 /**
  * @brief  Vrefint 를 이용해 실제 VDDA 를 역산한다.
- * @note   VDDA = 3300mV * VREFINT_CAL / VREFINT_DATA
- *         VREFINT_CAL 은 공장에서 VDDA=3.3V, 30도 조건으로 측정해
- *         0x1FFF7A2A 에 저장해 둔 값이다.
- *         USB 전원은 4.6~5.2V 로 흔들리고 LDO 출력도 함께 변하므로,
- *         고정 3300mV 를 쓰면 셀 전압에 수십 mV 오차가 그대로 실린다.
+ * @note   VDDA = 3300mV * VREFINT_CAL / VREFINT_DATA (CAL 은 공장 측정값).
+ *         USB 전원이 4.6~5.2V 로 흔들리면 LDO 출력도 같이 변하므로, 고정 3300mV 를 쓰면
+ *         셀 전압에 수십 mV 오차가 그대로 실린다.
  */
 int32_t hw_adc_get_vdda_mv(void)
 {
@@ -120,15 +106,8 @@ int32_t hw_adc_raw_to_uv(uint16_t raw)
     int32_t num, q, r;
 
     /* uV 로 계산해야 이후 분압 복원(x6)에서 절삭 오차가 누적되지 않는다.
-     *
-     * raw * vdda_mv * 1000 을 한 번에 곱하면 int32 가 넘친다.
-     *   4095 * 3300 * 1000 = 13,513,500,000  >  2,147,483,647
-     * (raw 가 약 650 만 넘어도 오버플로우 -> 음수/엉뚱한 uV 가 나온다)
-     * 그래서 몫/나머지로 쪼개 32bit 안에서 정확히 계산한다.
-     *   num = raw * vdda_mv        <= 4095 * 3600 = 14.7M   (안전)
-     *   q*1000                     <= 3600 * 1000 = 3.6M    (안전)
-     *   r*1000                     <  4095 * 1000 = 4.1M    (안전)
-     */
+     * 다만 raw * vdda_mv * 1000 을 한 번에 곱하면 int32 를 넘는다
+     * (4095*3300*1000 = 135억). 그래서 몫/나머지로 쪼개 32bit 안에서 계산한다. */
     num = (int32_t)raw * vdda_mv;
     q   = num / CFG_ADC_FULL_SCALE;
     r   = num % CFG_ADC_FULL_SCALE;

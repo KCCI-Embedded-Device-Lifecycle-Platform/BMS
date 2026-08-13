@@ -51,14 +51,17 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     BMS/hw/hw_adc.c
     BMS/hw/hw_gpio.c
     BMS/hw/hw_i2c.c
-    BMS/hw/hw_spi.c
     BMS/hw/hw_tick.c
     BMS/hw/hw_uart.c
 
     # dev : 부품 단위 드라이버
     BMS/dev/acs712.c
     BMS/dev/cell_adc.c
+    # 팩 전류 센서는 둘 다 컴파일해 두고 bms_cfg.h 의 CFG_PACK_SENSOR 로 고른다.
+    #   -> 선택되지 않은 쪽은 호출부가 없어 --gc-sections 가 통째로 걷어낸다.
+    #      (여기서 #if 로 빼면 안 쓰는 쪽이 조용히 썩는다. 둘 다 컴파일되게 둘 것)
     BMS/dev/ina219.c
+    BMS/dev/ina226.c
     BMS/dev/ntc.c
     BMS/dev/oled.c
     BMS/dev/status_led.c

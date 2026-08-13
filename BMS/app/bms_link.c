@@ -1,29 +1,17 @@
 /**
  * @file    bms_link.c
- * @brief   EVSE 통신 계층 (1단계: UART / 2단계: bxCAN)
+ * @brief   EVSE 통신 페이로드 패킹 (백엔드: UART / bxCAN)
  *
- * @details 왜 이렇게 나눴는가?
- *      1단계 보드였던 STM32F411RE 에는 bxCAN 페리페럴이 없었다.
- *      그렇다고 CAN 을 나중에 통째로 새로 짜면 1단계 작업이 버려진다.
+ * 1단계 보드(F411RE)에는 bxCAN 이 없어서 UART 로 시작했다. CAN 으로 옮길 때 통째로
+ * 다시 짜지 않도록 파일을 둘로 나눠 두었다:
+ *   (1) pack_xxx()        : CAN 프레임과 100% 동일한 바이트 페이로드 생성
+ *   (2) link_send_frame() : 그 바이트를 실제로 내보내는 한 곳
+ * 덕분에 2단계(F446RE + CAN1)로 옮기면서 패킹 로직은 한 줄도 바뀌지 않았다.
+ * 백엔드는 bms_cfg.h 의 CFG_LINK_TRANSPORT 로 고르고, 실제 프레임은 bms_can.c 가 보낸다.
  *
- *      그래서 이 파일을 두 부분으로 명확히 나눴다.
- *        (1) pack_xxx()   : CAN 프레임과 100% 동일한 8바이트 페이로드 생성
- *        (2) link_send()  : 그 8바이트를 실제로 내보내는 전송 함수
- *
- *      바이트 맵, 엔디안, 스케일링 로직은 전부 그대로 재사용된다.
- *
- * @note  2단계 보드(F446RE)로 옮기면서 bxCAN(CAN1, PB8 RX / PB9 TX)이
- *        붙었다. 실제 프레임 송수신은 bms_can.c 가 담당하고,
- *        이 파일은 bms_cfg.h 의 CFG_LINK_TRANSPORT 로 백엔드만 고른다.
- *        설계 의도대로 (1) 패킹 로직은 한 줄도 바뀌지 않았다.
- *
- * @note  바이트 맵 (CAN ID 0x100, DLC 8) - EVSE 파트와 합의한 규격
- *      Data[0..1]  Pack Voltage   0.01V 단위, Little Endian
- *      Data[2..3]  Pack Current   0.01A 단위, Little Endian, int16 (부호 있음)
- *      Data[4]     SOC            1% 단위
- *      Data[5]     Charge Permit  0 = 금지 / 1 = 허가
- *      Data[6]     BMS State      bms_state_t
- *      Data[7]     Fault Code     비트마스크 하위 8bit
+ * 0x100 바이트 맵 (DLC 8, EVSE 파트와 합의):
+ *   [0:1] Pack V 0.01V LE / [2:3] Pack I 0.01A int16 LE / [4] SOC%
+ *   [5] Charge Permit / [6] BMS State / [7] Fault 하위 8bit
  */
 #include "bms_link.h"
 #include "bms_fault.h"
@@ -32,7 +20,7 @@
 #include "dbg.h"
 
 /* ==================================================================
- *  전송 백엔드 : bms_cfg.h 의 CFG_LINK_TRANSPORT 하나로 갈린다
+ *  전송 백엔드 : CFG_LINK_TRANSPORT 하나로 갈린다
  * ================================================================== */
 static void link_send_frame(uint16_t can_id, const uint8_t *p_data, uint8_t dlc)
 {
@@ -43,7 +31,7 @@ static void link_send_frame(uint16_t can_id, const uint8_t *p_data, uint8_t dlc)
     (void)bms_can_send(can_id, p_data, dlc);
 
   #else
-    /* [1단계] UART ASCII 프레임 : 로직 분석기 없이 눈으로 검증 가능 */
+    /* [1단계] UART ASCII : 로직 분석기 없이 눈으로 검증 가능 */
     char     line[64];
     int      n;
     uint8_t  i;
@@ -62,7 +50,7 @@ static void link_send_frame(uint16_t can_id, const uint8_t *p_data, uint8_t dlc)
 }
 
 /* ==================================================================
- *  페이로드 패킹 (CAN 규격 그대로 - 전송 방식과 무관)
+ *  페이로드 패킹 (전송 방식과 무관)
  * ================================================================== */
 static void pack_u16_le(uint8_t *p, uint16_t v)
 {
@@ -92,8 +80,8 @@ void bms_link_init(void)
 void bms_link_send_main(const bms_data_t *p_d)
 {
     uint8_t d[8];
-    int32_t v_x100 = DIV_ROUND(p_d->pack_mv, 10);       /* mV  -> 0.01V */
-    int32_t i_x100 = DIV_ROUND(p_d->pack_ma, 10);       /* mA  -> 0.01A */
+    int32_t v_x100 = DIV_ROUND(p_d->pack_mv, 10);       /* mV -> 0.01V */
+    int32_t i_x100 = DIV_ROUND(p_d->pack_ma, 10);       /* mA -> 0.01A */
 
     v_x100 = CLAMP(v_x100, 0, 65535);
     i_x100 = CLAMP(i_x100, -32768, 32767);
@@ -107,7 +95,7 @@ void bms_link_send_main(const bms_data_t *p_d)
 
     link_send_frame(CFG_CAN_ID_MAIN, d, 8);
 
-    /* 0x103 : 상태/Fault 전용 (EVSE 가 빠르게 파싱하기 위한 축약 프레임) */
+    /* 0x103 : 상태/Fault 축약 (EVSE 가 빠르게 파싱하기 위한 프레임) */
     {
         uint8_t s[2];
         s[0] = (uint8_t)p_d->state;
@@ -129,10 +117,9 @@ void bms_link_send_cell(const bms_data_t *p_d)
     }
     link_send_frame(CFG_CAN_ID_CELL, d, 8);
 
-    /* 0x102 : 온도(0.1C, int16) + 셀 편차(mV) + Cell Min + Cell Max
-     * EVSE / Gateway 가 cell_min / cell_max 를 직접 요구하므로,
-     * BMS 가 이미 계산해 들고 있는 값을 그대로 실어 보낸다.
-     * (상위 노드가 0x101 의 셀 4개를 다시 훑어 최대/최소를 뽑을 필요가 없다) */
+    /* 0x102 : 온도 + 셀 편차 + Cell Min/Max.
+     * min/max 는 BMS 가 이미 계산해 들고 있으니 그대로 실어 보낸다 —
+     * 상위 노드가 0x101 의 셀 4개를 다시 훑을 필요가 없다. */
     {
         uint8_t t[8];
         pack_u16_le(&t[0], (uint16_t)(int16_t)CLAMP(p_d->temp_c10, -32768, 32767));
@@ -156,10 +143,8 @@ void bms_link_send_version(void)
 
 /**
  * @brief  EVSE -> BMS 수신 처리
- * @note   CAN 백엔드에서는 RX FIFO 를 비우며 명령을 디스패치한다.
- *         UART 백엔드에는 수신 경로가 없다. 하트비트 대용 'p' 명령은
- *         bms_app.c 의 콘솔 핸들러가 처리하므로, 여기서 hw_uart_get_byte()
- *         를 부르면 콘솔이 먹을 바이트를 가로채게 된다. 그래서 비워 둔다.
+ * @note   UART 백엔드에는 수신 경로가 없다. 여기서 hw_uart_get_byte() 를 부르면
+ *         bms_app.c 의 콘솔이 먹을 바이트를 가로채므로 비워 둔다.
  */
 void bms_link_poll_rx(void)
 {
