@@ -313,11 +313,20 @@ static void ap_task_1000ms(void)
 
     /* --- 콘솔 요약 로그 --- */
 #if (BRINGUP_S1_LED_DBG == 1)
-    DBG_I("[%s] C:%ld/%ld/%ld/%ld mV  PACK:%ldmV %ldmA  T:%ld.%ldC  SOC:%u%%  FLT:0x%04X P:%d RLY:%d",
+    /* PACK 의 출처를 표시한다. 팩 센서 읽기가 실패하면 ap_collect() 가 셀 ADC 합계를
+     * 그대로 두는데, 둘 다 "그럴듯한 팩 전압" 이라 로그만 봐서는 구분이 안 된다.
+     * 실제로 이것 때문에 INA226 이 25분간 죽어 있는 줄 모르고 지나갔다. */
+#if (BRINGUP_S3_PACK_SENSOR == 1)
+    const char *p_pack_src = pack_sensor_is_ok() ? "" : "(cellADC)";
+#else
+    const char *p_pack_src = "(cellADC)";
+#endif
+
+    DBG_I("[%s] C:%ld/%ld/%ld/%ld mV  PACK:%ldmV%s %ldmA  T:%ld.%ldC  SOC:%u%%  FLT:0x%04X P:%d RLY:%d",
           bms_fsm_state_name(s_bms.state),
           (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
           (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
-          (long)s_bms.pack_mv, (long)s_bms.pack_ma,
+          (long)s_bms.pack_mv, p_pack_src, (long)s_bms.pack_ma,
           (long)(s_bms.temp_c10 / 10), (long)(s_bms.temp_c10 % 10),
           s_bms.soc, s_bms.fault, (int)s_bms.charge_permit, (int)s_bms.relay_on);
 #endif
@@ -510,8 +519,46 @@ static void ap_console(void)
             (void)acs712_calibrate();
             break;
 
-        case 'i': case 'I':                     /* 팩 전류 센서 재초기화 */
-            (void)pack_sensor_init();
+        case 'i': case 'I':                     /* 팩 전류 센서 재초기화 + 즉시 1회 읽기 */
+            /* "init 성공" 과 "값이 실제로 들어온다" 는 다른 사실이다.
+             * init 은 CONFIG write-verify 까지만 보는데, 주기 읽기는 그 뒤에 따로 죽을 수
+             * 있고 한 번 죽으면 s_ok=false 로 조용히 포기한다. 그러면 로그에는
+             * "INA226 ok" 만 남고 PACK 값은 셀 ADC 합계에서 안 변해서, 되는 것처럼 보인다.
+             * 그 둘을 한 키로 갈라 주지 않으면 여기서 반드시 막힌다. */
+            if (pack_sensor_init()) {
+                s_bms.sensor_ready = true;
+                if (pack_sensor_update()) {
+                    DBG_I("INA226 read OK : bus=%ldmV shunt=%lduV I=%ldmA",
+                          (long)pack_sensor_get_bus_mv(),
+                          (long)pack_sensor_get_shunt_uv(),
+                          (long)pack_sensor_get_current_ma());
+                    DBG_I("  -> 이 bus 값이 다음 초 로그의 PACK 에 나타나야 정상이다");
+                } else {
+                    DBG_E("INA226 init 은 됐는데 주기 읽기가 실패한다");
+                    DBG_E("  -> PACK 에 보이는 값은 INA226 이 아니라 셀 ADC 합계다");
+                }
+            }
+            break;
+
+        case 'b': case 'B':                     /* I2C1 복구 + 스캔 + 장치 재초기화 */
+            /* 팩 센서(0x40)와 OLED(0x3C)가 같은 버스라, 둘 다 죽었을 때
+             * "버스 문제" 와 "모듈 하나 문제" 를 가르는 첫 수단이다.
+             * 스캔 전에 lock-up 복구를 한 번 돌린다 — 슬레이브가 SDA 를 물고 있으면
+             * 스캔 결과가 전부 0 으로 나와서 배선 문제와 구분되지 않는다. */
+            (void)hw_i2c_recover();
+            (void)hw_i2c_scan();
+            /* 버스를 세웠으면 그 위 장치도 같이 세운다. 배선을 고친 뒤 리셋 없이
+             * 바로 확인할 수 있어야 벤치에서 시행착오가 빨라진다. */
+#if (BRINGUP_S3_PACK_SENSOR == 1)
+            if (pack_sensor_init()) {
+                s_bms.sensor_ready = true;      /* SENSOR_ERR 해제 경로를 열어 준다 */
+            }
+#endif
+#if (BRINGUP_S5_OLED == 1)
+            if (oled_init()) {
+                bms_ui_init();
+            }
+#endif
             break;
 
         case 'f': case 'F':                     /* Fault 주입 : 다음 모드로 순환 */
@@ -556,7 +603,7 @@ static void ap_console(void)
 
         case 'h': case 'H':
             DBG_I("cmd: f=fault inject  n=inject off  p=heartbeat sim toggle");
-            DBG_I("     v=adc dump  c=acs cal  i=ina init");
+            DBG_I("     v=adc dump  c=acs cal  i=ina init  b=i2c recover+scan+reinit");
             DBG_I("     k=cell cal  d=cal dump  x=cal reset");
             DBG_I("CAN: t=frame trace  e=EVSE role  r=charge req  s=E-Stop  w=param write");
             DBG_I("now: inject=%s  link_sim=%s  relay=%d%s",

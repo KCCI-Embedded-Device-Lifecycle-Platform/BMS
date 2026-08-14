@@ -88,36 +88,43 @@
 #define CFG_VREFINT_CAL_ADDR            ((uint16_t *)0x1FFF7A2AUL)
 #define CFG_VREFINT_CAL_VDDA_MV         3300L       /* 캘리브레이션 시 VDDA */
 
-/* --- 팩 전압/전류 센서 (컴파일 타임 선택) ---
- * 최종 부품은 INA226 이지만 모듈 미입고라 현재는 INA219 로 돌린다.
- * app 계층은 dev/pack_sensor.h 만 보므로 교체 지점은 아래 한 줄뿐이다.
+/* --- 팩 전압/전류 센서 : INA226 (I2C) ---
+ * 2026-08-14 에 모듈이 입고되어 대체 부품(INA219) 경로를 제거했다.
+ * 컴파일 타임 선택(CFG_PACK_SENSOR)도 같이 없앴다 — 고를 것이 하나뿐인 스위치는
+ * "고를 수 있다" 는 착각만 남기고 실제로는 검증되지 않는 분기가 된다.
+ * 그래도 app 계층은 여전히 dev/pack_sensor.h 만 보므로 칩 이름을 모른다.
+ * 다른 칩으로 갈아탈 일이 생기면 고칠 곳은 bms_app.c 가 아니라 그 헤더 하나다.
  *
- * 결정적 차이는 PGA 유무 = "션트를 교체해야 하는가":
- *   INA226 : PGA 없음. 션트 풀스케일 +-81.92mV 고정이라 션트 값이 곧 측정 범위다.
- *            모듈 기본 0.1옴이면 +-0.82A 에서 포화해 과전류 임계 1A 조차 못 잰다
- *            -> 0.01옴 교체 + CFG_INA226_SHUNT_MOHM=10 이 전제.
- *   INA219 : PGA /8(+-320mV)이 있어 0.1옴 그대로 +-3.2A 를 커버한다 -> 교체 불필요.
- * 대가는 분해능(션트 LSB 10uV vs 2.5uV, 버스 4mV vs 1.25mV, HW 평균 없음)이지만
- * 이 프로젝트 임계값(500mA/1000mA, 16.8V)에는 충분하다.
+ * !! INA226 에는 PGA 가 없다. 션트 풀스케일이 +-81.92mV 로 고정이라
+ *    "션트 값 = 측정 범위" 이고, 이것이 이 칩의 유일한 함정이다:
+ *      0.1옴 (모듈 기본 R100) -> +-819mA   <- 과전류 임계 1A 를 아예 못 잰다
+ *      0.01옴 (교체품)        -> +-8.19A
+ *    포화는 런타임에 "전류가 안 올라가네" 로만 보이므로, ina226.c 가 이 값과
+ *    CFG_OVER_CURRENT_MA 를 비교해 빌드에서 #warning 으로 잡는다.
+ *    경고가 뜨면 임계값을 낮추지 말고 션트를 바꿀 것 (임계를 낮추면 실팩에서 무의미하다).
  *
- * !! 선택된 드라이버가 자기 풀스케일과 CFG_OVER_CURRENT_MA 를 비교해 #warning 을 낸다.
- *    경고가 뜨면 임계값을 낮추지 말고 션트를 바꿀 것 (임계를 낮추면 실팩에서 무의미하다). */
-#define CFG_PACK_SENSOR_INA226          1
-#define CFG_PACK_SENSOR_INA219          2
-#define CFG_PACK_SENSOR                 CFG_PACK_SENSOR_INA219
-
-/* --- I2C 주소 (INA226 / INA219 공통 주의) ---
- * 모듈 기본 주소가 양쪽 다 0x40 이라 주소로는 구분되지 않는다. 그래서 각 드라이버가
- * init 에서 상대 칩을 탐지한다 (INA226 에만 있는 0xFE ID 레지스터가 유일한 구분점).
+ * 분해능은 션트 LSB 2.5uV / 버스 LSB 1.25mV + 하드웨어 평균(AVG=16회)이라
+ * 이 프로젝트 임계값(500mA/1000mA, 16.8V)에는 여유가 충분하다.
  *
  * OLED(0x3C)와 같은 I2C1 버스지만 주소가 달라 충돌은 없다.
  * 풀업 4.7k 는 버스에 한 쌍만 남길 것 — 두 모듈에 다 붙어 있으면 2.35k 가 되어
  * 상승엣지가 뭉개진다. */
-#define CFG_INA226_I2C_ADDR             0x40U       /* 7bit */
+#define CFG_INA226_I2C_ADDR             0x40U       /* 7bit (A1/A0 = GND) */
 #define CFG_INA226_SHUNT_MOHM           100L        /* 모듈 기본 R100. 0.01ohm 교체 시 10 */
 
-#define CFG_INA219_I2C_ADDR             0x40U       /* 7bit */
-#define CFG_INA219_SHUNT_MOHM           100L        /* 모듈 기본 R100. PGA /8 라 교체 불필요 */
+/* --- I2C1 버스 속도 (.ioc 가 아니라 여기가 단일 소스) ---
+ * hw_i2c_init() 이 MX_I2C1_Init() 뒤에 이 값으로 덮어쓰고 재초기화한다
+ * (bms_can_init() 의 CAN 모드 덮어쓰기와 같은 패턴).
+ *
+ * 매크로로 뺀 이유는 이것이 **진단 도구**이기 때문이다:
+ *   "모듈이 고장인가" vs "배선 신호 무결성인가" 를 가르는 가장 빠른 시험이
+ *   400k -> 100k 로 내려 보는 것인데, .ioc 로 바꾸면 CubeMX 가 USER CODE 밖을
+ *   통째로 재생성해서 벤치에서 한 번 해 보기엔 대가가 너무 크다.
+ *
+ * 100k 에서 되고 400k 에서 안 되면 모듈은 멀쩡하다 — 배선 길이/풀업/용량 문제다.
+ * 그 경우 400k 로 되돌리는 것이 목표이지, 100k 로 눌러 두고 넘어가지 말 것
+ * (OLED flush 시간이 23ms -> 약 92ms 로 늘어 500ms 슬롯을 크게 잡아먹는다). */
+#define CFG_I2C_SPEED_HZ                400000L
 
 /* --- NTC --- */
 #define CFG_NTC_PULLUP_OHM              10000L
@@ -143,6 +150,11 @@
 #define CFG_OLED_I2C_ADDR               0x3CU       /* 7bit, 모듈에 따라 0x3D */
 #define CFG_OLED_WIDTH                  128U
 #define CFG_OLED_HEIGHT                 64U
+/* 대비 (0x81 레지스터). 칩 리셋 기본값은 0x7F 인데 그건 **외부 Vcc** 를 전제한 값이라,
+ * 내부 charge pump(0x8D 0x14)로 구동하는 이 모듈에서는 눈에 띄게 흐리게 나온다.
+ * 0xCF 가 내부 charge pump 구동 시의 표준 권장값이다.
+ * 더 밝게 하려면 0xFF 까지 올릴 수 있지만 OLED 는 번인이 있으므로 상시 표시에는 권하지 않는다. */
+#define CFG_OLED_CONTRAST               0xCFU
 /* 컨트롤러 컬럼 오프셋 : SSD1306 = 0, SH1106 = 2.
  * 화면이 좌우로 2픽셀 밀려 보이면 SH1106 이므로 2 로 바꾼다. */
 #define CFG_OLED_COL_OFFSET             0U

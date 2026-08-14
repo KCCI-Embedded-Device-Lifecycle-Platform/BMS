@@ -23,8 +23,15 @@
 #define OLED_CTRL_DATA      0x40U
 #define OLED_FONT_W         6U      /* 5px 글리프 + 1px 간격 */
 
+/* 버스 글리치로 죽었을 때 재초기화를 몇 번까지 시도할지.
+ * 무제한으로 두면 안 된다 — 버스가 진짜 죽어 있으면 재시도 1회가
+ * 커맨드 25개 x 타임아웃이라 500ms 슬롯이 통째로 블로킹되고, 100ms 슬롯의
+ * "Fault 후 100ms 내 permit=0" 이 무너진다. 20회(약 10초) 뒤 포기한다. */
+#define OLED_REINIT_MAX     20U
+
 static uint8_t s_fb[OLED_FB_SIZE];
 static bool    s_ok;
+static uint8_t s_reinit_cnt;
 
 /* --- 5x7 ASCII 폰트 (0x20 ~ 0x7E), 세로 비트, LSB=위 --- */
 static const uint8_t s_font5x7[][5] = {
@@ -70,7 +77,7 @@ static const uint8_t s_init_cmd[] = {
     0xC8,               /* COM scan direction 재매핑          */
     0x00, 0x10,         /* Column addr low/high              */
     0x40,               /* Start line = 0                    */
-    0x81, 0x7F,         /* Contrast                          */
+    0x81, CFG_OLED_CONTRAST,  /* Contrast (기본 0x7F 는 외부 Vcc 기준 - 흐리다) */
     0xA1,               /* Segment re-map                    */
     0xA6,               /* Normal display (A7 = 반전)         */
     0xA8, 0x3F,         /* Multiplex ratio = 64              */
@@ -113,21 +120,31 @@ static bool oled_cmd(uint8_t c)
     return oled_tx(false, &c, 1U);
 }
 
-bool oled_init(void)
+/** @brief 커맨드 시퀀스만 전송 (clear/flush 없음) — init 과 재초기화가 공유한다 */
+static bool oled_send_init_seq(void)
 {
     uint16_t i;
-
-    s_ok = false;
-
-    if (!oled_bus_setup()) {
-        return false;
-    }
 
     for (i = 0; i < sizeof(s_init_cmd); i++) {
         if (!oled_cmd(s_init_cmd[i])) {
             DBG_E("OLED init cmd[%u] fail", i);
             return false;
         }
+    }
+    return true;
+}
+
+bool oled_init(void)
+{
+    s_ok         = false;
+    s_reinit_cnt = 0U;
+
+    if (!oled_bus_setup()) {
+        return false;
+    }
+
+    if (!oled_send_init_seq()) {
+        return false;
     }
 
     s_ok = true;
@@ -146,8 +163,24 @@ void oled_flush(void)
 {
     uint8_t page;
 
+    /* 전송 실패 한 번으로 화면이 리셋까지 영구히 죽는 것을 막는다.
+     * s_ok=false 로만 두면 "OLED flush fail" 한 줄 뒤 화면이 마지막 프레임에 얼어붙어,
+     * 값이 갱신되지 않는 것을 표시 버그로 오인하게 된다 (실제 원인은 I2C 버스다).
+     * 프레임버퍼는 살아 있으므로 커맨드 시퀀스만 다시 태우면 그대로 복귀한다. */
     if (!s_ok) {
-        return;
+        if (s_reinit_cnt >= OLED_REINIT_MAX) {
+            return;                 /* 포기 (아래 경고를 이미 냈다) */
+        }
+        s_reinit_cnt++;
+        if (!oled_send_init_seq()) {
+            if (s_reinit_cnt == OLED_REINIT_MAX) {
+                DBG_E("OLED 재초기화 %u회 실패 - 포기. I2C 배선/풀업을 볼 것 ('b' 로 재시도)",
+                      s_reinit_cnt);
+            }
+            return;
+        }
+        s_ok = true;
+        DBG_W("OLED re-init ok (%u회째) - I2C 버스가 불안정하다", s_reinit_cnt);
     }
 
     for (page = 0; page < OLED_PAGES; page++) {

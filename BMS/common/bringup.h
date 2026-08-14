@@ -11,11 +11,12 @@
 #define BRINGUP_S1_LED_DBG      1   /* LED 블링크 + UART 로그        (부품 불필요) */
 #define BRINGUP_S1B_ADC_RAW     1   /* ADC1+DMA 기동만 ('v' 덤프/VDDA 검증)  (부품 불필요) */
 #define BRINGUP_S2_CELL_ADC     1   /* 셀 4채널 ADC + 분압 복원      (저항, 시뮬레이터) */
-/* 어느 칩인지는 여기가 아니라 bms_cfg.h 의 CFG_PACK_SENSOR 가 정한다 (현재 INA219).
- * 이 스위치는 "팩 전류 센서를 쓸 것인가" 만 결정한다. */
-#define BRINGUP_S3_PACK_SENSOR  1   /* 팩 전압/전류 I2C              (INA226/INA219) */
+/* 이 스위치는 "팩 전류 센서를 쓸 것인가" 만 결정한다.
+ * 칩은 INA226 하나로 고정이다 (2026-08-14 모듈 입고, INA219 경로 제거).
+ * 다른 칩으로 갈아탈 일이 생기면 고칠 곳은 dev/pack_sensor.h 다. */
+#define BRINGUP_S3_PACK_SENSOR  1  /* 팩 전압/전류 I2C              (INA226) */
 #define BRINGUP_S4_NTC_ACS      0   /* 온도 + 전류 크로스체크        (NTC, ACS712) */
-#define BRINGUP_S5_OLED         0   /* 로컬 표시                     (SSD1306) */
+#define BRINGUP_S5_OLED         1   /* 로컬 표시                     (SSD1306) */
 #define BRINGUP_S6_LINK         1   /* 상태 프레임 송신 (UART->CAN)  */
 #define BRINGUP_S7_FSM_FAULT    1   /* FSM + Fault 통합              */
 /* 릴레이의 "실제 출력". 0 이면 논리 지령만 계산하고 PA8 은 계속 열어 둔다

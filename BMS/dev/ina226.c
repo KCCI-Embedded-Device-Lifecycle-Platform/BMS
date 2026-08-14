@@ -2,9 +2,12 @@
  * @file    ina226.c
  * @brief   INA226 팩 전압/전류 측정 드라이버 (I2C)
  *
- * INA219 와 파일을 나눈 이유: 레지스터 이름만 같고 스케일이 전부 다르다.
+ * 이 프로젝트의 팩 전류 센서는 INA226 하나다 (2026-08-14, INA219 대체 경로 제거).
  *
- *    항목            INA219                  INA226 (최종 부품)
+ * 핀 호환인 INA219 와 헷갈리기 쉬운 지점이 세 곳 있다 — 잘못 포팅하면 컴파일은 되고
+ * 값만 조용히 틀어지므로 미리 적어 둔다:
+ *
+ *    항목            INA219                  INA226 (이 파일)
  *    션트 풀스케일   +-40/80/160/320mV(PGA)  +-81.92mV 고정 (PGA 없음)
  *    션트 LSB        10uV                    2.5uV
  *    버스            26V / 4mV / >>3 필요    36V / 1.25mV / 시프트 없음
@@ -14,8 +17,8 @@
  *    이면 +-0.82A 에서 포화하므로, 과전류 임계(1A)나 실팩 전류를 재려면 0.01옴 교체가
  *    필요하다. 런타임에는 "전류가 안 올라가네" 로만 보이므로 아래 검사로 빌드에서 잡는다.
  *
- * @note  전류를 CURRENT 레지스터가 아니라 션트 전압에서 직접 계산하는 이유는 ina219.c 와
- *        같다 — CALIB 설정 실수가 개입하지 않고 원값(uV)을 그대로 볼 수 있다.
+ * @note  전류를 CURRENT 레지스터가 아니라 션트 전압에서 직접 계산한다 —
+ *        CALIB 설정 실수가 개입하지 않고 원값(uV)을 그대로 볼 수 있다.
  */
 #include "ina226.h"
 #include "hw_i2c.h"
@@ -44,37 +47,47 @@
 /* 션트 풀스케일 +-81.92mV -> 측정 가능한 최대 전류[mA] */
 #define INA226_FS_MA        (81920L / CFG_INA226_SHUNT_MOHM)
 
-#if (CFG_PACK_SENSOR == CFG_PACK_SENSOR_INA226)
-  #if (INA226_FS_MA <= CFG_OVER_CURRENT_MA)
-    #warning "INA226 shunt saturates below CFG_OVER_CURRENT_MA -- \
+/* 션트가 과전류 임계보다 먼저 포화하면 그 fault 는 영원히 못 뜬다.
+ * 값을 고르는 곳(bms_cfg.h)과 포화하는 곳(여기)이 떨어져 있어 빌드에서 못을 박는다. */
+#if (INA226_FS_MA <= CFG_OVER_CURRENT_MA)
+  #warning "INA226 shunt saturates below CFG_OVER_CURRENT_MA -- \
 over-current fault can never be measured. Replace the module shunt with 0.01ohm \
 (CFG_INA226_SHUNT_MOHM=10) or lower CFG_OVER_CURRENT_MA."
-  #endif
 #endif
+
+/* 버스 글리치로 죽었을 때 재설정을 몇 번까지 시도할지 (oled.c 와 같은 이유·같은 형태).
+ * 무제한이면 버스가 진짜 죽었을 때 100ms 슬롯이 매번 I2C 타임아웃만큼 밀려
+ * "Fault 후 100ms 내 permit=0" 이 무너진다. 20회(약 2초) 뒤 포기한다. */
+#define INA226_RECFG_MAX    20U
 
 static int32_t s_bus_mv;
 static int32_t s_shunt_uv;
 static int32_t s_current_ma;
 static bool    s_ok;
 static bool    s_sat_warned;        /* 포화 경고는 1회만 (100ms 주기 로그 폭주 방지) */
+static uint8_t s_recfg_cnt;         /* 버스 글리치 후 재설정 시도 횟수 */
 
-bool ina226_init(void)
+/**
+ * @brief  ACK 확인 + 소프트리셋 + CONFIG/CALIB write + write-verify
+ * @note   init() 과 "주기 읽기 실패 후 자동 재설정" 이 공유한다.
+ *         재시도 카운터를 건드리지 않는 것이 init() 과의 유일한 차이다.
+ */
+static bool ina226_configure(void)
 {
     uint16_t val = 0;
-
-    s_ok         = false;
-    s_sat_warned = false;
 
     if (!hw_i2c_is_ready(CFG_INA226_I2C_ADDR)) {
         DBG_E("INA226 no ACK at 0x%02X (A1/A0 배선 확인)", CFG_INA226_I2C_ADDR);
         return false;
     }
 
-    /* 1) 제조사 ID 확인. INA219 를 같은 0x40 에 꽂아 두고 이 드라이버를 빌드하는 실수를
-     *    걸러낸다 (INA219 에는 0xFE 가 없다). 클론 칩이 ID 를 안 채우기도 해서 경고만 한다. */
+    /* 1) 제조사 ID 확인. 모듈이 정말 INA226 인지 보는 유일한 수단이다 —
+     *    핀·주소가 같은 INA219 를 꽂아도 ACK 는 똑같이 오고, 그대로 두면 전압 8배·
+     *    전류 4배로 조용히 오측정된다 (INA219 에는 0xFE 레지스터가 없다).
+     *    클론 칩이 ID 를 안 채우는 경우가 있어 거부하지 않고 경고만 한다. */
     if (hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_MFG_ID, &val)) {
         if (val != INA226_MFG_ID_TI) {
-            DBG_W("INA226 mfg id = 0x%04X (expect 0x%04X) - INA219 아닌지 확인",
+            DBG_W("INA226 mfg id = 0x%04X (expect 0x%04X) - INA219 를 꽂은 것 아닌지 확인",
                   val, INA226_MFG_ID_TI);
         }
     }
@@ -95,6 +108,11 @@ bool ina226_init(void)
 
     /* 4) 읽어서 확인 (write-verify) */
     if (!hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, &val)) {
+        /* 여기가 조용하면 init 이 아무 흔적 없이 false 를 돌려줘서, 호출부 로그에
+         * INA226 줄이 통째로 사라진다 ('b' 출력에서 실제로 그랬다).
+         * write 는 되는데 read 만 실패하는 패턴은 SDA 상승시간(풀업) 문제를 시사한다 —
+         * read 는 슬레이브가 SDA 를 놓고 풀업이 끌어올려야 하는 구간이 더 많다. */
+        DBG_E("INA226 config read-back fail (write 는 됐는데 read 가 실패 = 풀업/상승시간 의심)");
         return false;
     }
     if (val != INA226_CFG_VALUE) {
@@ -102,9 +120,22 @@ bool ina226_init(void)
         return false;
     }
 
+    return true;
+}
+
+bool ina226_init(void)
+{
+    s_ok         = false;
+    s_sat_warned = false;
+    s_recfg_cnt  = 0U;
+
+    if (!ina226_configure()) {
+        return false;
+    }
+
     s_ok = true;
     DBG_I("INA226 ok (cfg=0x%04X, shunt=%ld mohm, FS=%ld mA)",
-          val, (long)CFG_INA226_SHUNT_MOHM, (long)INA226_FS_MA);
+          INA226_CFG_VALUE, (long)CFG_INA226_SHUNT_MOHM, (long)INA226_FS_MA);
     return true;
 }
 
@@ -113,8 +144,22 @@ bool ina226_update(void)
     uint16_t raw;
     int16_t  sraw;
 
+    /* 전송 실패 한 번으로 리셋까지 영구히 죽는 것을 막는다.
+     * 예전에는 여기서 그냥 return 했는데, 그러면 app 이 pack_mv 를 셀 ADC 합계로
+     * 그대로 두고 그 값도 그럴듯해서 "되고 있다" 로 보인다 (실제로 그렇게 지나갔다). */
     if (!s_ok) {
-        return false;
+        if (s_recfg_cnt >= INA226_RECFG_MAX) {
+            return false;               /* 포기 (아래 경고를 이미 냈다) */
+        }
+        s_recfg_cnt++;
+        if (!ina226_configure()) {
+            if (s_recfg_cnt == INA226_RECFG_MAX) {
+                DBG_E("INA226 재설정 %u회 실패 - 포기. 'i' 로 수동 재시도", s_recfg_cnt);
+            }
+            return false;
+        }
+        s_ok = true;
+        DBG_W("INA226 re-init ok (%u회째) - I2C 버스가 불안정하다", s_recfg_cnt);
     }
 
     /* --- Bus Voltage : 16bit 전체가 전압, LSB 1.25mV ---
@@ -129,6 +174,10 @@ bool ina226_update(void)
     /* --- Shunt Voltage : 2의 보수 16bit, LSB = 2.5uV --- */
     if (!hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_SHUNT_V, &raw)) {
         s_ok = false;
+        /* 이 로그가 없어서 오래 헤맸다 — 버스 읽기는 로그를 내는데 션트 읽기만
+         * 조용히 죽어서, "INA226 ok 인데 값이 안 들어온다" 로만 보였다.
+         * 실패 경로에는 반드시 흔적을 남길 것. */
+        DBG_E("INA226 shunt read fail");
         return false;
     }
     sraw       = (int16_t)raw;

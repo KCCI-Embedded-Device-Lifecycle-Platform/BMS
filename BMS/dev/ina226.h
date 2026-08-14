@@ -3,8 +3,9 @@
 #include "common_def.h"
 
 /* --- 레지스터 맵 (데이터시트 Table 3) ---
- * INA219 와 0x00~0x05 는 이름이 같지만 의미/스케일이 다르다.
- * 0xFE/0xFF 는 INA219 에 없는 ID 레지스터로, 모듈 실장 여부 확인에 쓴다. */
+ * 핀 호환인 INA219 와 0x00~0x05 는 이름이 같지만 의미/스케일이 다르다 (ina226.c 상단 표).
+ * 0xFE/0xFF 는 INA219 에 없는 ID 레지스터라, 꽂힌 모듈이 정말 INA226 인지 가리는
+ * 유일한 런타임 근거다 (ina226_init 이 여기서 경고를 낸다). */
 #define INA226_REG_CONFIG       0x00U
 #define INA226_REG_SHUNT_V      0x01U
 #define INA226_REG_BUS_V        0x02U

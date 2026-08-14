@@ -57,10 +57,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # dev : 부품 단위 드라이버
     BMS/dev/acs712.c
     BMS/dev/cell_adc.c
-    # 팩 전류 센서는 둘 다 컴파일해 두고 bms_cfg.h 의 CFG_PACK_SENSOR 로 고른다.
-    #   -> 선택되지 않은 쪽은 호출부가 없어 --gc-sections 가 통째로 걷어낸다.
-    #      (여기서 #if 로 빼면 안 쓰는 쪽이 조용히 썩는다. 둘 다 컴파일되게 둘 것)
-    BMS/dev/ina219.c
+    # 팩 전류 센서. 2026-08-14 INA226 입고로 대체 경로(ina219.c)는 삭제했다.
+    #   -> app 계층은 여전히 dev/pack_sensor.h 만 보므로, 칩을 갈면 그 헤더와 이 한 줄이 전부다.
     BMS/dev/ina226.c
     BMS/dev/ntc.c
     BMS/dev/oled.c
