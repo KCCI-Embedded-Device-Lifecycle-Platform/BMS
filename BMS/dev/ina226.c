@@ -76,7 +76,7 @@ static bool ina226_configure(void)
 {
     uint16_t val = 0;
 
-    if (!hw_i2c_is_ready(CFG_INA226_I2C_ADDR)) {
+    if (!hw_i2c_is_ready(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR)) {
         DBG_E("INA226 no ACK at 0x%02X (A1/A0 배선 확인)", CFG_INA226_I2C_ADDR);
         return false;
     }
@@ -85,7 +85,7 @@ static bool ina226_configure(void)
      *    핀·주소가 같은 INA219 를 꽂아도 ACK 는 똑같이 오고, 그대로 두면 전압 8배·
      *    전류 4배로 조용히 오측정된다 (INA219 에는 0xFE 레지스터가 없다).
      *    클론 칩이 ID 를 안 채우는 경우가 있어 거부하지 않고 경고만 한다. */
-    if (hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_MFG_ID, &val)) {
+    if (hw_i2c_reg_read16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_MFG_ID, &val)) {
         if (val != INA226_MFG_ID_TI) {
             DBG_W("INA226 mfg id = 0x%04X (expect 0x%04X) - INA219 를 꽂은 것 아닌지 확인",
                   val, INA226_MFG_ID_TI);
@@ -93,21 +93,21 @@ static bool ina226_configure(void)
     }
 
     /* 2) 소프트 리셋 : 이전 세션 설정이 남아있을 수 있다 */
-    (void)hw_i2c_reg_write16(CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, INA226_CFG_RESET);
+    (void)hw_i2c_reg_write16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, INA226_CFG_RESET);
     HAL_Delay(5);
 
     /* 3) 설정 write */
-    if (!hw_i2c_reg_write16(CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, INA226_CFG_VALUE)) {
+    if (!hw_i2c_reg_write16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, INA226_CFG_VALUE)) {
         DBG_E("INA226 config write fail");
         return false;
     }
-    if (!hw_i2c_reg_write16(CFG_INA226_I2C_ADDR, INA226_REG_CALIB, INA226_CALIB_VALUE)) {
+    if (!hw_i2c_reg_write16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_CALIB, INA226_CALIB_VALUE)) {
         DBG_E("INA226 calib write fail");
         return false;
     }
 
     /* 4) 읽어서 확인 (write-verify) */
-    if (!hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, &val)) {
+    if (!hw_i2c_reg_read16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_CONFIG, &val)) {
         /* 여기가 조용하면 init 이 아무 흔적 없이 false 를 돌려줘서, 호출부 로그에
          * INA226 줄이 통째로 사라진다 ('b' 출력에서 실제로 그랬다).
          * write 는 되는데 read 만 실패하는 패턴은 SDA 상승시간(풀업) 문제를 시사한다 —
@@ -164,7 +164,7 @@ bool ina226_update(void)
 
     /* --- Bus Voltage : 16bit 전체가 전압, LSB 1.25mV ---
      * INA219 와 달리 시프트가 없다 (>>3 을 남겨두면 전압이 1/8 로 읽힌다 - 포팅 1순위 함정) */
-    if (!hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_BUS_V, &raw)) {
+    if (!hw_i2c_reg_read16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_BUS_V, &raw)) {
         s_ok = false;
         DBG_E("INA226 bus read fail");
         return false;
@@ -172,7 +172,7 @@ bool ina226_update(void)
     s_bus_mv = ((int32_t)raw * 5) / 4;
 
     /* --- Shunt Voltage : 2의 보수 16bit, LSB = 2.5uV --- */
-    if (!hw_i2c_reg_read16(CFG_INA226_I2C_ADDR, INA226_REG_SHUNT_V, &raw)) {
+    if (!hw_i2c_reg_read16(HW_I2C_SENSOR, CFG_INA226_I2C_ADDR, INA226_REG_SHUNT_V, &raw)) {
         s_ok = false;
         /* 이 로그가 없어서 오래 헤맸다 — 버스 읽기는 로그를 내는데 션트 읽기만
          * 조용히 죽어서, "INA226 ok 인데 값이 안 들어온다" 로만 보였다.

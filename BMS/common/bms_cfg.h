@@ -58,11 +58,7 @@
 #define CFG_SELFCHK_CELL_MIN_MV         2000
 #define CFG_SELFCHK_CELL_MAX_MV         4500
 
-/* FAULT 를 온보드 LD2(PA5)로도 같이 점멸시킬지.
- * Fault LED(PC8)는 외부 LED 를 배선해야 보이므로, 1 이면 배선 없이도 눈으로 확인된다. */
-#define CFG_FAULT_LED_MIRROR_LD2        1
-
-/* --- 충전 차단 릴레이 (PA8, NO 접점) ---
+/* --- 충전 차단 릴레이 (PB5, NO 접점) ---
  * EVSE 릴레이를 대체하는 것이 아니라 permit 을 물리적으로 한 번 더 끊는 직렬 이중화다.
  * 최종 차단 권한은 EVSE 에 있다. 그래서 켜는 조건도 permit 보다 좁다 (ap_relay_update).
  *
@@ -169,13 +165,9 @@
 /* ==================================================================
  * 4. 통신
  * ================================================================== */
-/* --- 전송 백엔드 선택 ---
- * UART : 1단계. 로직 분석기 없이 터미널로 프레임을 눈으로 검증한다.
- * CAN  : 2단계. F446 의 bxCAN(CAN1, PB8 RX / PB9 TX)을 쓴다.
- *        페이로드 바이트 맵은 둘이 100% 동일하다. */
-#define CFG_LINK_TRANSPORT_UART         0
-#define CFG_LINK_TRANSPORT_CAN          1
-#define CFG_LINK_TRANSPORT              CFG_LINK_TRANSPORT_CAN
+/* 전송은 CAN 하나다 (CAN1, PB8 RX / PB9 TX).
+ * 한때 UART ASCII 백엔드를 고를 수 있었지만 실버스 검증 후 제거했다 — 고를 것이
+ * 하나뿐인 스위치는 "고를 수 있다" 는 착각만 남기고 아무도 컴파일하지 않는 분기가 된다. */
 
 /* EVSE / Gateway 와 합의한 버스 속도. 이 매크로는 "규격" 일 뿐 하드웨어를 바꾸지 않는다
  * (실제 값은 APB1 x .ioc 의 Prescaler/BS1/BS2 로 결정). bms_can_init() 이 부팅 때
@@ -185,15 +177,12 @@
  * 실배선 길이로 늘리는 순간 에러 프레임이 터진다. EVSE(F429ZI)도 APB1 42MHz 면 동일. */
 #define CFG_CAN_BITRATE_BPS             500000L
 
-/* --- CAN 동작 모드 (.ioc 가 아니라 여기가 단일 소스) ---
- * 1 = LOOPBACK : 트랜시버/상대 노드 없이 송수신 경로를 자기완결로 검증
- * 0 = NORMAL   : 실제 버스. 상대 노드가 ACK 를 줘야 송신이 성립한다.
- * bms_can_init() 이 이 값으로 hcan1.Init.Mode 를 덮어쓰고 재초기화하므로
- * CubeMX 로 .ioc 를 재생성해도 여기가 이긴다.
+/* CAN 동작 모드는 NORMAL 고정이고 bms_can_init() 이 .ioc 값을 덮어쓴다.
+ * (LOOPBACK 선택지는 실버스 검증 후 제거 — 자기 0x100 을 하트비트로 인정하는
+ *  루프백 전용 예외가 실버스 코드에 섞이는 것이 더 위험했다)
  *
- * !! NORMAL 에서 한쪽 보드만 켜면 ACK 를 줄 노드가 없어 Bus-Off 로 가는 것이 정상이다.
+ * !! 한쪽 보드만 켜면 ACK 를 줄 노드가 없어 Bus-Off 로 가는 것이 정상이다.
  *    ABOM=ENABLE 이라 상대를 연결하면 자동 복귀한다. */
-#define CFG_CAN_MODE_LOOPBACK           0
 
 /* ---- 송신 ID (BMS -> EVSE) ---- */
 #define CFG_CAN_ID_MAIN                 0x100U      /* 100ms */

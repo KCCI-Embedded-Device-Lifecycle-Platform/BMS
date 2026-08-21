@@ -103,12 +103,12 @@ static bool oled_tx(bool is_data, const uint8_t *p_data, uint16_t len)
     }
     tx[0] = is_data ? OLED_CTRL_DATA : OLED_CTRL_CMD;
     memcpy(&tx[1], p_data, len);
-    return hw_i2c_write(CFG_OLED_I2C_ADDR, tx, (uint16_t)(len + 1U));
+    return hw_i2c_write(HW_I2C_OLED, CFG_OLED_I2C_ADDR, tx, (uint16_t)(len + 1U));
 }
 
 static bool oled_bus_setup(void)
 {
-    if (!hw_i2c_is_ready(CFG_OLED_I2C_ADDR)) {
+    if (!hw_i2c_is_ready(HW_I2C_OLED, CFG_OLED_I2C_ADDR)) {
         DBG_E("OLED no ACK at 0x%02X (try 0x3D)", CFG_OLED_I2C_ADDR);
         return false;
     }

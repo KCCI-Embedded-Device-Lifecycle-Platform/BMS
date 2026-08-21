@@ -39,113 +39,9 @@ static bms_data_t s_bms;
 
 static uint32_t s_t100, s_t500, s_t1000;
 
-/* --- Fault 주입 ('f') ---
- * 배터리 없이 Fault/FSM 경로를 검증하기 위한 시연 경로.
- * ap_collect() 맨 끝에서 블랙보드를 덮어쓰므로 실측값을 이긴다.
- * 링크 쪽은 s_link_sim('p')이 따로 담당한다 -> 'f/n' 은 셀/온도만 건드린다. */
-typedef enum {
-    INJ_OFF = 0,
-    INJ_NORMAL,
-    INJ_CELL_OV,
-    INJ_CELL_UV,
-    INJ_IMBALANCE,
-    INJ_OVER_TEMP,
-    INJ_MAX
-} inject_t;
-
-static uint8_t s_inject;        /* inject_t */
-
-/* EVSE 하트비트 흉내 ('p').
- * 하트비트는 CFG_LINK_TIMEOUT_MS(1초)만 유효하므로 1회 갱신으로는 곧 LINK_TIMEOUT 이
- * 재발한다. 실제 EVSE 처럼 계속 갱신해야 해서 토글로 두고 100ms 슬롯마다 갱신한다. */
-static bool s_link_sim;
-
-/* --- EVSE 역할 ('e') : 2보드 CAN 테스트 ---
- * 같은 펌웨어를 올린 Nucleo 두 장으로 실버스를 만든다.
- * 보드 B 에서 'e' 를 누르면 0x200/0x201 을 100ms 로 쏘는 EVSE 흉내가 된다.
- *
- * 역할은 배타적이다 — 켜지면 BMS 프레임(0x100~0x104) 송신을 멈춘다.
- * 같은 ID 를 두 노드가 동시에 실으면 데이터 구간에서 비트 에러가 터지는데,
- * 증상이 "간헐적으로 CAN 이 죽는다" 로만 나와 원인을 찾기 매우 어렵다.
- * 이 보드는 0x200 을 받지 못해 FAULT 에 갇히므로, 자기 로그가 상대 프레임을
- * 덮지 않도록 s_link_sim 도 같이 켠다. */
-static bool s_evse_role;
-static bool s_evse_role_req  = true;    /* 0x201 충전 요청 ('r') */
-static bool s_evse_role_stop;           /* 0x200 E-Stop    ('s') */
-
-/* 0x205 로 쏠 과온 임계 순환값. 700 은 상한(CFG_OT_LIMIT_MAX_C10=600)을 일부러 넘긴다 —
- * 상대 BMS 가 클램프해서 600 을 에코백하는지가 원격 파라미터의 핵심 안전 동작이다. */
-static const int16_t k_param_ot[] = { 350, 500, 700, 550 };
-static uint8_t       s_param_idx;
-
-static const char *inject_name(uint8_t m)
-{
-    static const char *name[INJ_MAX] = {
-        "OFF", "NORMAL", "CELL_OV", "CELL_UV", "IMBALANCE", "OVER_TEMP"
-    };
-    return (m < (uint8_t)INJ_MAX) ? name[m] : "?";
-}
-
-/**
- * @brief  주입 모드에 맞춰 블랙보드를 덮어쓴다.
- * @note   실측 소스가 있는 항목은 건드리지 않는다. S3 가 켜져 있으면 pack_mv/pack_ma 를
- *         남겨 두어 Fault 시연 중에도 로그/OLED 에 실측값이 보인다.
- */
-static void ap_inject_apply(void)
-{
-    static const int32_t tbl[INJ_MAX][BMS_CELL_COUNT] = {
-        /* OFF       */ { 0,    0,    0,    0    },
-        /* NORMAL    */ { 3700, 3700, 3700, 3700 },
-        /* CELL_OV   */ { 4250, 3700, 3700, 3700 },   /* > CFG_CELL_OV_MV   */
-        /* CELL_UV   */ { 2900, 3700, 3700, 3700 },   /* < CFG_CELL_UV_MV   */
-        /* IMBALANCE */ { 3900, 3700, 3650, 3700 },   /* 편차 250mV, Warning */
-        /* OVER_TEMP */ { 3700, 3700, 3700, 3700 }
-    };
-    uint8_t i;
-    int32_t mx, mn, sum = 0;
-
-    if (s_inject == (uint8_t)INJ_OFF) {
-        return;
-    }
-
-    for (i = 0; i < BMS_CELL_COUNT; i++) {
-        s_bms.cell_mv[i] = tbl[s_inject][i];
-        sum += s_bms.cell_mv[i];
-    }
-
-    mx = s_bms.cell_mv[0];
-    mn = s_bms.cell_mv[0];
-    for (i = 1; i < BMS_CELL_COUNT; i++) {
-        mx = MAX(mx, s_bms.cell_mv[i]);
-        mn = MIN(mn, s_bms.cell_mv[i]);
-    }
-    s_bms.cell_max_mv  = mx;
-    s_bms.cell_min_mv  = mn;
-    s_bms.imbalance_mv = mx - mn;
-
-#if (BRINGUP_S3_PACK_SENSOR == 1)
-    UNUSED_ARG(sum);                /* 팩 전압/전류는 실측(INA2xx)을 그대로 둔다 */
-#else
-    s_bms.pack_mv = sum;
-    s_bms.pack_ma = 0;
-#endif
-#if (BRINGUP_S4_NTC_ACS == 0)
-    s_bms.acs_ma = s_bms.pack_ma;   /* 둘이 어긋나면 SENSOR_ERR 가 끼어든다 */
-#endif
-
-    if (s_inject == (uint8_t)INJ_OVER_TEMP) {
-        /* 컴파일 상수가 아니라 "지금 적용 중인" 임계 기준으로 넘긴다.
-         * 0x205 로 임계를 올려 둔 상태에서도 'f' 가 동작해야 한다. */
-        s_bms.temp_c10 = bms_fault_get_ot_threshold() + 50;
-    }
-#if (BRINGUP_S4_NTC_ACS == 0)
-    else {
-        s_bms.temp_c10 = 250;       /* NTC 가 없으므로 상온으로 채운다 */
-    }
-#endif
-
-    s_bms.sensor_ready = true;      /* 실제 센서가 없어도 주입 중엔 정상 취급 */
-}
+/* 자가진단은 init(끝)과 콘솔 's' 두 곳에서 불린다. 정의는 init 바로 앞에 두어
+ * "부팅 마지막 단계" 라는 순서를 코드 배치로도 드러낸다. */
+static void ap_selfcheck(void);
 
 /* ------------------------------------------------------------------ */
 static void ap_collect(void)
@@ -197,19 +93,91 @@ static void ap_collect(void)
     s_bms.evse_estop      = bms_can_evse_estop();
     s_bms.evse_fault      = bms_can_evse_fault();
 #else
-    /* CAN 이 없으면 0x201 이 영원히 안 와서 CHARGE_READY 로 못 올라간다.
-     * 하트비트와 충전 요청을 s_link_sim 하나에 묶어 'p' 한 번으로
-     * "EVSE 가 사라진" 상황이 통째로 재현되게 한다. */
-    s_bms.evse_charge_req = s_link_sim;
-    s_bms.evse_connected  = s_link_sim;
+    /* CAN 을 끄면 0x201 이 영원히 안 오므로 CHARGE_READY 로 올라갈 수 없다.
+     * 예전에는 콘솔 'p' 로 하트비트를 흉내내 이 구간을 메웠지만, 실링크가 붙은 뒤
+     * 그 경로는 제거했다 — "정말 받은 것" 과 구분되지 않아 진단을 오염시킨다.
+     * 즉 S6=0 은 이제 "링크 없음" 그대로이고, IDLE 에서 더 올라가지 않는 것이 정상이다. */
+    s_bms.evse_charge_req = false;
+    s_bms.evse_connected  = false;
     s_bms.evse_relay_on   = false;
     s_bms.evse_estop      = false;
     s_bms.evse_fault      = 0U;
 #endif
-
-    /* 주입은 항상 마지막 : 실측값을 덮어써야 시연이 성립한다 */
-    ap_inject_apply();
 }
+/* ==================================================================
+ *  릴레이 개폐 창(window) 트레이스 — "릴레이를 닫으면 CELL_OV" 전용 계측
+ *
+ *  이 현상은 1초 요약 로그로는 원인을 가를 수 없다. 트립하면 FSM 이 같은 슬롯에서
+ *  릴레이를 다시 열고, 열리면 값이 원래대로 돌아와서 요약에는 "임계 이하" 만 남는다.
+ *  ("CELL_OV 인데 로그의 셀 전압은 4200 미만" 으로 보이는 이유가 이것이다)
+ *
+ *  그래서 릴레이 지령이 바뀌는 순간에만 창을 열고 100ms 슬롯마다 한 줄씩 찍는다.
+ *  상시 출력이 아니라 창 안에서만 나오므로 다른 로그를 덮지 않는다.
+ *
+ *  dN[i] = "닫히기 직전(= 열린 상태)" 노드값 대비 변화량이다. 이 한 줄로 갈린다:
+ *
+ *    dN 넷이 비슷하게 +     -> 기준전위(GND)가 통째로 밀린 것이다.
+ *                             cell1 = node1 그 자체라 이동분이 셀1 에만 실리고
+ *                             cell2~4 는 차분이라 상쇄된다. 원인은 릴레이 코일
+ *                             전류 x 공용 접지 배선 저항 -> 코일 GND 를 star point 로.
+ *    dN 이 뒤로 갈수록 커짐 -> 팩 전압이 실제로 오른 것 = 진짜 충전 전류다.
+ *                             이때 CELL_OV 는 오판이 아니라 정상 동작이다.
+ *    dTEC 가 같이 튐        -> 교란이 CAN 차동버스까지 갔다. 셀 ADC 와 CAN 은
+ *                             서로 무관한 두 계통이라 공통분모는 접지뿐이다.
+ * ================================================================== */
+#define RLYW_SLOTS      12U     /* 100ms x 12 = 1.2s. 닫힘->트립(300ms)->열림->복귀를 덮는다 */
+
+static uint8_t  s_rlyw_left;                    /* 남은 출력 슬롯 (0 = 창 닫힘) */
+static int32_t  s_rlyw_base[BMS_CELL_COUNT];    /* 릴레이가 열려 있던 마지막 노드값 */
+static uint16_t s_rlyw_base_tec;
+static uint32_t s_rlyw_t0;
+
+/**
+ * @brief  릴레이 지령이 바뀌는 순간 호출 — 기준값을 잡고 창을 연다
+ * @param  closing : 이번 변화가 "닫힘" 인가
+ * @note   기준은 반드시 "닫기 직전" 값이어야 한다. ap_collect() 가 이번 슬롯 앞에서
+ *         이미 돌았고 그때는 접점이 아직 열려 있었으므로 s_bms.node_mv 가 곧
+ *         열린 상태의 값이다. 열릴 때는 기준을 새로 잡지 않는다 — 닫힘 구간과
+ *         같은 자로 재야 dN 이 비교 가능한 값이 된다.
+ */
+static void ap_relay_window_arm(bool closing)
+{
+    uint8_t i;
+
+    if (closing) {
+        for (i = 0; i < BMS_CELL_COUNT; i++) {
+            s_rlyw_base[i] = s_bms.node_mv[i];
+        }
+        s_rlyw_base_tec = bms_can_get_tec();
+        s_rlyw_t0       = hw_tick_ms();
+    }
+    s_rlyw_left = RLYW_SLOTS;
+}
+
+/**
+ * @brief  창이 열려 있는 동안 100ms 슬롯마다 1줄
+ * @note   dbg 버퍼가 128B 라 한 줄에 다 못 넣는다. 절대 노드값은 Fault 확정 시
+ *         bms_fault.c 가 따로 찍으므로 여기서는 변화량(dN)만 남긴다.
+ */
+static void ap_relay_window_trace(void)
+{
+    if (s_rlyw_left == 0U) {
+        return;
+    }
+    s_rlyw_left--;
+
+    DBG_W("RLYW+%lums R:%d dN%+ld/%+ld/%+ld/%+ld C:%ld/%ld/%ld/%ld TEC%+d F:0x%04X",
+          (unsigned long)(hw_tick_ms() - s_rlyw_t0), (int)s_bms.relay_on,
+          (long)(s_bms.node_mv[0] - s_rlyw_base[0]),
+          (long)(s_bms.node_mv[1] - s_rlyw_base[1]),
+          (long)(s_bms.node_mv[2] - s_rlyw_base[2]),
+          (long)(s_bms.node_mv[3] - s_rlyw_base[3]),
+          (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
+          (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
+          (int)((int32_t)bms_can_get_tec() - (int32_t)s_rlyw_base_tec),
+          s_bms.fault);
+}
+
 
 /**
  * @brief  충전 차단 릴레이(PA8) 지령
@@ -228,6 +196,7 @@ static void ap_relay_update(void)
               on ? "CLOSE" : "OPEN", (int)s_bms.charge_permit,
               bms_fsm_state_name(s_bms.state),
               (BRINGUP_S8_RELAY == 1) ? "" : "  [OUTPUT DISABLED]");
+        ap_relay_window_arm(on);      /* 개폐 전후 원값을 남긴다 (RLYW 트레이스) */
         s_bms.relay_on = on;
     }
 
@@ -246,10 +215,6 @@ static void ap_task_100ms(void)
 {
     ap_collect();
 
-    if (s_link_sim) {
-        bms_fault_notify_link();        /* EVSE 가 붙어 있는 상황을 흉내 */
-    }
-
 #if (BRINGUP_S7_FSM_FAULT == 1)
     bms_fault_check(&s_bms);
     bms_fsm_run(&s_bms);
@@ -259,17 +224,20 @@ static void ap_task_100ms(void)
     /* FSM 직후 / CAN 송신 직전. "Fault 후 100ms 내 차단" 을 물리 접점까지 같은 슬롯에서 끝낸다. */
     ap_relay_update();
 
+    /* 노랑 LED 는 릴레이 지령을 그대로 따른다. ap_relay_update() 와 status_led_update()
+     * 사이여야 접점 개폐와 표시가 같은 슬롯에서 끝난다 — 한 슬롯 밀리면 "릴레이는 떨어졌는데
+     * 노랑이 아직 켜져 있는" 100ms 가 생기고, 그게 차단 실패와 구분되지 않는다. */
+    status_led_set_charge(s_bms.relay_on);
+
     status_led_update();
 
 #if (BRINGUP_S6_LINK == 1)
-    /* 실제 EVSE 도 0x200/0x201 을 100ms 로 보낸다. 같은 슬롯에 두어야
-     * 상대 BMS 의 LINK_TIMEOUT 여유가 실물과 같아진다. */
-    if (s_evse_role) {
-        bms_can_sim_evse(s_evse_role_req, s_evse_role_stop);
-    } else {
-        bms_link_send_main(&s_bms);
-    }
+    bms_link_send_main(&s_bms);
 #endif
+
+    /* 릴레이 개폐 창이 열려 있으면 이번 슬롯 원값을 남긴다.
+     * 측정->판단->릴레이->송신이 모두 끝난 뒤라 한 줄이 그 슬롯의 최종 상태다. */
+    ap_relay_window_trace();
 }
 
 static void ap_task_500ms(void)
@@ -277,7 +245,7 @@ static void ap_task_500ms(void)
 #if (BRINGUP_S4_NTC_ACS == 1)
     ntc_update();
     acs712_update();
-    s_bms.temp_c10 = ntc_get_temp_c10(0);
+    s_bms.temp_c10 = ntc_get_temp_max_c10();
     s_bms.acs_ma   = acs712_get_ma();
 #endif
 
@@ -286,9 +254,7 @@ static void ap_task_500ms(void)
 #endif
 
 #if (BRINGUP_S6_LINK == 1)
-    if (!s_evse_role) {
-        bms_link_send_cell(&s_bms);
-    }
+    bms_link_send_cell(&s_bms);
 #endif
 }
 
@@ -299,16 +265,10 @@ static void ap_task_1000ms(void)
 #endif
 
 #if (BRINGUP_S6_LINK == 1)
-    if (!s_evse_role) {
-        bms_link_send_version();
-    }
+    bms_link_send_version();
     /* CAN 요약을 상태 요약보다 먼저 찍어 "원인 -> 결과" 순서로 읽히게 한다.
      * 링크가 죽어 있으면 아래 줄의 FLT/P 는 전부 그 결과일 뿐이다. */
     bms_can_log_stats();
-    if (s_evse_role) {
-        DBG_W("[EVSE ROLE] 0x200/0x201 송신 중 (req=%d estop=%d) - BMS 프레임 정지",
-              (int)s_evse_role_req, (int)s_evse_role_stop);
-    }
 #endif
 
     /* --- 콘솔 요약 로그 --- */
@@ -431,19 +391,12 @@ static void ap_console(void)
         }
 
         switch (ch) {
-        case 'p': case 'P':                     /* EVSE 하트비트 흉내 on/off */
-            s_link_sim = !s_link_sim;
-            if (s_link_sim) {
-                bms_fault_notify_link();
-            }
-            DBG_W("link heartbeat sim -> %s", s_link_sim ? "ON" : "OFF");
-#if (BRINGUP_S6_LINK == 1)
-            /* 'p' 는 CAN 을 우회해 notify_link() 를 직접 부른다.
-             * 켜 두면 "CAN 수신이 되고 있다" 와 구분이 안 된다. */
-            if (s_link_sim) {
-                DBG_W("  (주의: 'p' 는 CAN 을 우회한다. CAN 수신 검증 중이면 끌 것)");
-            }
-#endif
+        case 's': case 'S':                     /* 자가진단 재실행 */
+            /* 배선을 고친 뒤 리셋 없이 다시 확인할 수 있어야 벤치 시행착오가 짧아진다.
+             * sensor_ready 를 다시 세우므로 SELF_CHECK 실패로 FAULT 에 갇힌 상태에서
+             * 복구 경로로도 쓸 수 있다 (Fault 해제는 여전히 히스테리시스를 따른다). */
+            ap_collect();
+            ap_selfcheck();
             break;
 
         case 't': case 'T':                     /* CAN 프레임 트레이스 on/off */
@@ -456,52 +409,6 @@ static void ap_console(void)
             DBG_W("CAN frame trace -> %s", bms_can_get_trace() ? "ON" : "OFF");
             break;
 
-        case 'e': case 'E':                     /* EVSE 역할 토글 (2보드 테스트) */
-            if (!bms_can_is_ready()) {
-                DBG_E("CAN 이 기동되지 않았다 (BRINGUP_S6_LINK=%d / init 실패 확인)",
-                      BRINGUP_S6_LINK);
-                break;
-            }
-            s_evse_role = !s_evse_role;
-            if (s_evse_role) {
-                /* 이 보드는 더 이상 BMS 가 아니다. 자기 LINK_TIMEOUT 로그가
-                 * 상대 프레임을 덮지 않도록 하트비트 시뮬을 같이 켠다. */
-                s_link_sim = true;
-                bms_fault_notify_link();
-                DBG_W("EVSE ROLE ON - 이 보드는 0x200/0x201 만 보낸다 (BMS 프레임 정지)");
-                DBG_W("  r=충전요청 토글  s=E-Stop 토글  w=0x205 과온임계 쓰기");
-            } else {
-                DBG_W("EVSE ROLE OFF - BMS 로 복귀 (0x100~0x104 송신 재개)");
-            }
-            break;
-
-        case 'r': case 'R':                     /* EVSE 역할: 충전 요청 토글 */
-            if (!s_evse_role) {
-                DBG_E("EVSE 역할이 아니다 ('e' 로 먼저 켤 것)");
-                break;
-            }
-            s_evse_role_req = !s_evse_role_req;
-            DBG_W("EVSE charge_req(0x201) -> %d", (int)s_evse_role_req);
-            break;
-
-        case 's': case 'S':                     /* EVSE 역할: E-Stop 토글 */
-            if (!s_evse_role) {
-                DBG_E("EVSE 역할이 아니다 ('e' 로 먼저 켤 것)");
-                break;
-            }
-            s_evse_role_stop = !s_evse_role_stop;
-            DBG_W("EVSE E-Stop(0x200[3]) -> %d", (int)s_evse_role_stop);
-            break;
-
-        case 'w': case 'W':                     /* EVSE 역할: 0x205 파라미터 쓰기 */
-            if (!s_evse_role) {
-                DBG_E("EVSE 역할이 아니다 ('e' 로 먼저 켤 것)");
-                break;
-            }
-            bms_can_sim_param(k_param_ot[s_param_idx]);
-            s_param_idx = (uint8_t)((s_param_idx + 1U) % ARRAY_SIZE(k_param_ot));
-            break;
-
         case 'v': case 'V':                     /* ADC raw 덤프 (캘리브레이션용) */
             {
                 uint16_t raw[ADC_IDX_MAX];
@@ -512,6 +419,17 @@ static void ap_console(void)
                           (long)hw_adc_raw_to_uv(raw[i]));
                 }
                 DBG_I("VDDA = %ld mV", (long)hw_adc_get_vdda_mv());
+#if (BRINGUP_S4_NTC_ACS == 1)
+                /* 블랙보드에는 최댓값 하나만 남으므로, 어느 채널이 단선이고
+                 * 어느 채널이 튀는지는 여기서만 보인다. */
+                for (i = 0; i < 4U; i++) {
+                    DBG_I("ntc[%u] %ld.%ldC  R=%ld ohm", i,
+                          (long)(ntc_get_temp_c10(i) / 10),
+                          (long)(ntc_get_temp_c10(i) % 10),
+                          (long)ntc_get_res_ohm(i));
+                }
+                DBG_I("ntc valid = %u/4", ntc_get_valid_count());
+#endif
             }
             break;
 
@@ -540,13 +458,20 @@ static void ap_console(void)
             }
             break;
 
-        case 'b': case 'B':                     /* I2C1 복구 + 스캔 + 장치 재초기화 */
-            /* 팩 센서(0x40)와 OLED(0x3C)가 같은 버스라, 둘 다 죽었을 때
-             * "버스 문제" 와 "모듈 하나 문제" 를 가르는 첫 수단이다.
-             * 스캔 전에 lock-up 복구를 한 번 돌린다 — 슬레이브가 SDA 를 물고 있으면
-             * 스캔 결과가 전부 0 으로 나와서 배선 문제와 구분되지 않는다. */
-            (void)hw_i2c_recover();
-            (void)hw_i2c_scan();
+        case 'b': case 'B':                     /* I2C 두 버스 복구 + 스캔 + 장치 재초기화 */
+            {
+                uint8_t bus;
+                /* 버스를 나눈 뒤로는 **두 버스를 다 훑는 것**이 핵심이다.
+                 * 한쪽만 죽어 있으면 그 버스에 달린 모듈이 곧 범인이고,
+                 * 둘 다 죽어 있으면 원인은 모듈이 아니라 공통 GND/3.3V 쪽이다.
+                 * 공유 버스일 때는 이 구분이 안 돼서 모듈을 하나씩 떼야 했다.
+                 * 스캔 전에 lock-up 복구를 한 번 돌린다 — 슬레이브가 SDA 를 물고 있으면
+                 * 스캔 결과가 전부 0 으로 나와서 배선 문제와 구분되지 않는다. */
+                for (bus = 0; bus < (uint8_t)HW_I2C_MAX; bus++) {
+                    (void)hw_i2c_recover((hw_i2c_bus_t)bus);
+                    (void)hw_i2c_scan((hw_i2c_bus_t)bus);
+                }
+            }
             /* 버스를 세웠으면 그 위 장치도 같이 세운다. 배선을 고친 뒤 리셋 없이
              * 바로 확인할 수 있어야 벤치에서 시행착오가 빨라진다. */
 #if (BRINGUP_S3_PACK_SENSOR == 1)
@@ -561,27 +486,8 @@ static void ap_console(void)
 #endif
             break;
 
-        case 'f': case 'F':                     /* Fault 주입 : 다음 모드로 순환 */
-            s_inject++;
-            if (s_inject >= (uint8_t)INJ_MAX) {
-                s_inject = (uint8_t)INJ_NORMAL; /* OFF 는 'n' 으로만 간다 */
-            }
-            DBG_W("inject -> %s", inject_name(s_inject));
-            break;
-
-        case 'n': case 'N':                     /* 주입 해제 (실측값으로 복귀) */
-            s_inject = (uint8_t)INJ_OFF;
-            DBG_W("inject -> OFF");
-            break;
-
         case 'k': case 'K':                     /* 셀 노드 게인 캘리브레이션 */
 #if (BRINGUP_S2_CELL_ADC == 1)
-            if (s_inject != (uint8_t)INJ_OFF) {
-                /* 캘리브레이션은 dev 계층 값을 직접 읽어 주입과 간섭하지 않지만,
-                 * 로그/OLED 에는 주입값이 보여서 헷갈리므로 미리 알린다. */
-                DBG_W("cal: 주입이 켜져 있다(%s). 로그의 셀 전압은 가짜다 - 'n' 권장",
-                      inject_name(s_inject));
-            }
             s_con_mode = (uint8_t)CON_CAL_SEL_NODE;
             DBG_I("cal: 보정할 노드 선택 1~4 (B1/B2/B3/B+), q=취소");
             DBG_I("     현재 %ld / %ld / %ld / %ld mV",
@@ -601,20 +507,58 @@ static void ap_console(void)
             DBG_W("cal: 전 채널 x1.000 / 0mV 로 초기화");
             break;
 
+        case 'l': case 'L':                     /* 표시 출력 뮤트 (접지 진단) */
+            /* LED 구동 전류가 공용 접지 배선을 타면 셀 ADC 기준전위가 밀린다.
+             * 3색 LED 로 바뀌면서 FAULT 는 빨강 상시 점등이라 예전의 100ms 교대가 없다.
+             * 지금 100ms 로 교대하는 구간은 SELF_CHECK(초록 0xAAAA) 뿐이므로,
+             * 판정은 "뮤트 ON/OFF 로 셀 전압이 통째로 이동하는가"(DC 오프셋)로 본다.
+             * 이동이 남아 있으면 원인은 LED 가 아닌 다른 부하다. */
+            status_led_set_mute(!status_led_get_mute());
+            DBG_W("status LED -> %s", status_led_get_mute() ? "MUTE" : "ON");
+            DBG_W("  뮤트 후 셀1 의 100ms 교대가 사라지면 접지 공유가 원인이다");
+            break;
+
+        case 'g': case 'G':                     /* 충전 진입 조건 스냅샷 */
+            /* "EVSE 버튼을 눌렀는데 충전이 안 된다" 를 한 키로 가른다.
+             * CHARGE_READY 진입 조건이 4개(permit / link_ok / charge_req / !estop)라
+             * 하나만 빠져도 결과가 똑같이 "안 올라감" 으로 보인다. 1초 요약 로그에는
+             * 그 4개 중 permit 밖에 안 나오므로 나머지 셋은 여기서만 보인다. */
+            DBG_I("--- charge gate ---");
+            DBG_I(" state=%s permit=%d relay=%d fault=0x%04X(%s)",
+                  bms_fsm_state_name(s_bms.state), (int)s_bms.charge_permit,
+                  (int)s_bms.relay_on, s_bms.fault, bms_fault_name(s_bms.fault));
+            DBG_I(" link_ok=%d evse req=%d estop=%d conn=%d rly=%d flt=0x%02X",
+                  FLAG_IS_SET(s_bms.fault, BMS_FLT_LINK_TIMEOUT) ? 0 : 1,
+                  (int)s_bms.evse_charge_req, (int)s_bms.evse_estop,
+                  (int)s_bms.evse_connected, (int)s_bms.evse_relay_on,
+                  s_bms.evse_fault);
+            DBG_I(" node mV %ld/%ld/%ld/%ld  VDDA %ld",
+                  (long)s_bms.node_mv[0], (long)s_bms.node_mv[1],
+                  (long)s_bms.node_mv[2], (long)s_bms.node_mv[3],
+                  (long)s_bms.vdda_mv);
+            DBG_I(" cell mV %ld/%ld/%ld/%ld  imb %ld",
+                  (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
+                  (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
+                  (long)s_bms.imbalance_mv);
+            /* 이 여유가 곧 "접지가 몇 mV 밀리면 트립하는가" 다. node 는 x6 복원된
+             * 값이므로, 접지에서 (여유/6) mV 만 밀려도 셀1 이 임계를 넘는다. */
+            DBG_I(" OV margin %ld mV (= GND %ld mV 이동이면 트립)",
+                  (long)(CFG_CELL_OV_MV - s_bms.cell_max_mv),
+                  (long)((CFG_CELL_OV_MV - s_bms.cell_max_mv) * 1000L / CFG_DIV_SCALE_X1000));
+            DBG_I(" pack %ldmV %ldmA  sensor_ready=%d",
+                  (long)s_bms.pack_mv, (long)s_bms.pack_ma, (int)s_bms.sensor_ready);
+            break;
+
         case 'h': case 'H':
-            DBG_I("cmd: f=fault inject  n=inject off  p=heartbeat sim toggle");
-            DBG_I("     v=adc dump  c=acs cal  i=ina init  b=i2c recover+scan+reinit");
-            DBG_I("     k=cell cal  d=cal dump  x=cal reset");
-            DBG_I("CAN: t=frame trace  e=EVSE role  r=charge req  s=E-Stop  w=param write");
-            DBG_I("now: inject=%s  link_sim=%s  relay=%d%s",
-                  inject_name(s_inject), s_link_sim ? "ON" : "OFF",
+            DBG_I("cmd: s=self check  v=adc dump  c=acs cal  i=ina init");
+            DBG_I("     b=i2c recover+scan+reinit  k=cell cal  d=cal dump  x=cal reset");
+            DBG_I("     g=charge gate 스냅샷  l=LED mute (접지 진단)  t=CAN frame trace");
+            DBG_I("now: relay=%d%s",
                   (int)s_bms.relay_on,
                   (BRINGUP_S8_RELAY == 1) ? "" : " (output disabled)");
-            DBG_I("CAN: %s  trace=%s  role=%s",
-                  bms_can_is_ready() ? ((CFG_CAN_MODE_LOOPBACK == 1) ? "LOOPBACK" : "NORMAL")
-                                     : "NOT STARTED",
-                  bms_can_get_trace() ? "ON" : "OFF",
-                  s_evse_role ? "EVSE" : "BMS");
+            DBG_I("CAN: %s  trace=%s",
+                  bms_can_is_ready() ? "NORMAL 500k" : "NOT STARTED",
+                  bms_can_get_trace() ? "ON" : "OFF");
             break;
 
         default:
@@ -624,6 +568,131 @@ static void ap_console(void)
 }
 
 /* ================================================================== */
+/* ==================================================================
+ *  부팅 자가진단 (POST) — 콘솔 's' 로 언제든 재실행
+ *
+ *  init 안에 흩어져 있던 "실패하면 sensor_ready=false" 판정을 한 곳에 모아
+ *  한 줄씩 PASS/FAIL 로 찍는다. 이게 없으면 "무엇이 왜 안 잡혔는지" 를 부팅 로그
+ *  스무 줄쯤 거슬러 올라가며 짜맞춰야 한다.
+ *
+ *  !! 여기서 하는 것은 존재/범위 확인뿐이고 Fault 판정은 하지 않는다.
+ *     "Fault 는 bms_fault_check() 한 곳" 규칙을 깨지 않기 위해서다.
+ *
+ *  !! **측정 계통만 sensor_ready 를 내린다** (ADC / 셀 / 팩 센서).
+ *     OLED·CAN 은 보고만 하고 게이트하지 않는다 — 표시장치가 없다고 배터리 감시를
+ *     멈추는 것은 안전 방향이 반대다. CAN 두절은 이미 LINK_TIMEOUT 이 따로 잡는다.
+ * ================================================================== */
+static bool ap_post(const char *name, bool ok, const char *fmt_detail)
+{
+    if (ok) {
+        DBG_I("  [ OK ] %-9s %s", name, fmt_detail);
+    } else {
+        DBG_E("  [FAIL] %-9s %s", name, fmt_detail);
+    }
+    return ok;
+}
+
+static void ap_selfcheck(void)
+{
+    char    det[64];
+    bool    measure_ok = true;      /* sensor_ready 를 좌우하는 계통만 누적 */
+    int32_t vdda;
+
+    DBG_I("--- self check ---");
+
+    /* --- ADC / VDDA : 모든 아날로그 측정의 기준이라 제일 먼저 본다 --- */
+#if BRINGUP_ADC_HW
+    vdda = hw_adc_get_vdda_mv();
+    /* Vrefint 역산이 3.0~3.6V 밖이면 ADC 가 안 돌거나 기준이 깨진 것이다.
+     * 이 값이 틀리면 셀 전압이 전부 같은 비율로 틀리므로 여기서 먼저 걸러야 한다. */
+    (void)snprintf(det, sizeof(det), "VDDA %ld mV", (long)vdda);
+    measure_ok &= ap_post("ADC", hw_adc_is_ready() && (vdda > 3000) && (vdda < 3600), det);
+#else
+    UNUSED_ARG(vdda);
+    (void)ap_post("ADC", true, "(S1B/S2/S4 OFF - 미사용)");
+#endif
+
+    /* --- 셀 전압 범위 : 분압/배선 오류를 여기서 잡는다 --- */
+#if (BRINGUP_S2_CELL_ADC == 1)
+    {
+        uint8_t i;
+        bool    range_ok = true;
+        for (i = 0; i < BMS_CELL_COUNT; i++) {
+            if ((s_bms.cell_mv[i] < CFG_SELFCHK_CELL_MIN_MV) ||
+                (s_bms.cell_mv[i] > CFG_SELFCHK_CELL_MAX_MV)) {
+                range_ok = false;
+            }
+        }
+        (void)snprintf(det, sizeof(det), "%ld/%ld/%ld/%ld mV (%d~%d)",
+                       (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
+                       (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
+                       CFG_SELFCHK_CELL_MIN_MV, CFG_SELFCHK_CELL_MAX_MV);
+        measure_ok &= ap_post("CELL", range_ok, det);
+    }
+#else
+    (void)ap_post("CELL", true, "(S2 OFF - SELF_CHECK 는 실패한다)");
+#endif
+
+    /* --- 팩 전류 센서 : 션트 원값을 같이 찍는다 ---
+     * 계산된 mA 만 보면 "정말 전류가 없다" 와 "션트가 포화됐다" 가 똑같이 보인다.
+     * 원값(uV)이 ±81920 근처면 포화다 (0.1Ω 모듈에서 ±819mA). */
+#if (BRINGUP_S3_PACK_SENSOR == 1)
+    {
+        bool ok = pack_sensor_is_ok() && pack_sensor_update();
+        (void)snprintf(det, sizeof(det), "%s %ld mV %ld mA (shunt %ld uV)",
+                       PACK_SENSOR_NAME, (long)pack_sensor_get_bus_mv(),
+                       (long)pack_sensor_get_current_ma(),
+                       (long)pack_sensor_get_shunt_uv());
+        measure_ok &= ap_post("PACK", ok, det);
+    }
+#else
+    (void)ap_post("PACK", true, "(S3 OFF - pack_mv 는 셀 ADC 합계)");
+#endif
+
+    /* --- NTC / ACS712 : 보고만 한다 (게이트하지 않음) ---
+     * 온도가 전부 죽어도 bms_fault_check() 가 과온 판정을 건너뛸 뿐 감시는 계속된다. */
+#if (BRINGUP_S4_NTC_ACS == 1)
+    {
+        uint8_t n = ntc_get_valid_count();
+        (void)snprintf(det, sizeof(det), "%u/4 valid, max %ld.%ld C",
+                       n, (long)(ntc_get_temp_max_c10() / 10),
+                       (long)(ntc_get_temp_max_c10() % 10));
+        (void)ap_post("NTC", (n > 0U), det);
+
+        (void)snprintf(det, sizeof(det), "offset %ld uV, %ld mA",
+                       (long)acs712_get_offset_uv(), (long)acs712_get_ma());
+        (void)ap_post("ACS712", true, det);
+    }
+#else
+    (void)ap_post("NTC/ACS", true, "(S4 OFF - temp=-999.9C, acs=0mA)");
+#endif
+
+    /* --- OLED / CAN : 보고 전용 --- */
+#if (BRINGUP_S5_OLED == 1)
+    (void)ap_post("OLED", hw_i2c_is_ready(HW_I2C_OLED, CFG_OLED_I2C_ADDR),
+                  "I2C3 PA8/PC9 0x3C");
+#endif
+#if (BRINGUP_S6_LINK == 1)
+    (void)snprintf(det, sizeof(det), "NORMAL 500k, TEC %u", bms_can_get_tec());
+    (void)ap_post("CAN", bms_can_is_ready(), det);
+#endif
+
+    /* --- 릴레이 : 부팅 직후에는 반드시 열려 있어야 한다 ---
+     * CFG_RELAY_ACTIVE_HIGH 가 실물과 반대면 여기가 통과해도 접점은 붙어 있다
+     * (지령만 보므로). 그래서 실물 확인을 대신하지 못한다는 것을 문구에 남긴다. */
+    (void)snprintf(det, sizeof(det), "cmd=%d%s", (int)s_bms.relay_on,
+                   (BRINGUP_S8_RELAY == 1) ? " (LIVE - 접점 실물 확인 필요)"
+                                           : " (S8=0, 출력 차단)");
+    (void)ap_post("RELAY", !s_bms.relay_on, det);
+
+    s_bms.sensor_ready = measure_ok;
+    if (measure_ok) {
+        DBG_I("--- self check PASS ---");
+    } else {
+        DBG_E("--- self check FAIL -> SELF_CHECK 에서 FAULT 로 간다 ---");
+    }
+}
+
 void bms_app_init(void)
 {
     memset(&s_bms, 0, sizeof(s_bms));
@@ -667,14 +736,16 @@ void bms_app_init(void)
     }
 #endif
 
-/* 팩 센서(0x40)와 OLED(0x3C)가 I2C1 을 공유한다. 둘 중 하나만 켜도 버스는 필요하다. */
+/* 팩 센서(I2C1 PB6/PB7)와 OLED(I2C3 PA8/PC9)는 버스가 다르다.
+ * hw_i2c_init() 이 둘을 한꺼번에 세우므로 스위치는 OR 로 둔다 — 한쪽만 켜도 두 버스가
+ * 다 초기화되지만, 안 쓰는 버스는 라인 상태 한 줄만 찍고 끝이라 비용이 없다. */
 #if (BRINGUP_S3_PACK_SENSOR == 1) || (BRINGUP_S5_OLED == 1)
     hw_i2c_init();
 #endif
 
 #if (BRINGUP_S3_PACK_SENSOR == 1)
     if (!pack_sensor_init()) {
-        (void)hw_i2c_recover();
+        (void)hw_i2c_recover(HW_I2C_SENSOR);
         if (!pack_sensor_init()) {
             s_bms.sensor_ready = false;
         }
@@ -693,20 +764,10 @@ void bms_app_init(void)
     }
 #endif
 
-#if (BRINGUP_S7_FSM_FAULT == 1) && (BRINGUP_S2_CELL_ADC == 0)
-    /* 셀 ADC 가 없으면 cell_mv 가 전부 0 이라 SELF_CHECK 가 곧바로 실패한다.
-     * 시연을 시작할 수 있도록 NORMAL 주입으로 출발한다. */
-    s_inject = (uint8_t)INJ_NORMAL;
-    DBG_W("!! CELL ADC OFF -> fault injection ON (fake cell data) !!");
-    DBG_W("!! 'f' 로 OV/UV/IMBAL/OT 순환, 'n' 으로 해제 !!");
-#endif
-
-#if (BRINGUP_S6_LINK == 0)
-    /* EVSE 가 없으면 1초 뒤 LINK_TIMEOUT 으로 FAULT 에 갇힌다.
-     * 링크 외 동작을 먼저 보려면 하트비트 시뮬이 켜져 있어야 한다. */
-    s_link_sim = true;
-    DBG_W("!! LINK OFF -> heartbeat sim ON ('p' 로 토글) !!");
-#endif
+    /* 자가진단 전에 한 번 수집해 둔다. 셀 전압 범위 검사가 블랙보드를 보므로,
+     * 이게 없으면 전부 0 인 상태를 읽어 무조건 FAIL 이 난다. */
+    ap_collect();
+    ap_selfcheck();
 
     s_t100  = hw_tick_ms();
     s_t500  = s_t100;

@@ -63,6 +63,10 @@ void Error_Handler(void);
 #define ADC_NTC1_GPIO_Port GPIOC
 #define ADC_ACS712_Pin GPIO_PIN_2
 #define ADC_ACS712_GPIO_Port GPIOC
+#define ADC_NTC3_Pin GPIO_PIN_3
+#define ADC_NTC3_GPIO_Port GPIOC
+#define ADC_NTC4_Pin GPIO_PIN_4
+#define ADC_NTC4_GPIO_Port GPIOC
 #define ADC_CELL1_Pin GPIO_PIN_0
 #define ADC_CELL1_GPIO_Port GPIOA
 #define ADC_CELL2_Pin GPIO_PIN_1
@@ -73,12 +77,12 @@ void Error_Handler(void);
 #define LED_RUN_GPIO_Port GPIOA
 #define ADC_PACK_Pin GPIO_PIN_0
 #define ADC_PACK_GPIO_Port GPIOB
+#define LED_CHARGE_Pin GPIO_PIN_6
+#define LED_CHARGE_GPIO_Port GPIOC
 #define LED_FAULT_Pin GPIO_PIN_8
 #define LED_FAULT_GPIO_Port GPIOC
-#define BUZZER_Pin GPIO_PIN_9
-#define BUZZER_GPIO_Port GPIOC
-#define RELAY_CHG_Pin GPIO_PIN_8
-#define RELAY_CHG_GPIO_Port GPIOA
+#define RELAY_CHG_Pin GPIO_PIN_5
+#define RELAY_CHG_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -21,7 +21,6 @@
 #define CHARGE_STOP_MA          30
 
 static bms_state_t s_state;
-static bms_state_t s_prev;
 
 static void fsm_enter(bms_data_t *p_d, bms_state_t next)
 {
@@ -30,7 +29,6 @@ static void fsm_enter(bms_data_t *p_d, bms_state_t next)
     }
 
     DBG_I("FSM %s -> %s", bms_fsm_state_name(s_state), bms_fsm_state_name(next));
-    s_prev  = s_state;
     s_state = next;
 
     /* --- entry action --- */
@@ -54,7 +52,6 @@ static void fsm_enter(bms_data_t *p_d, bms_state_t next)
 void bms_fsm_init(bms_data_t *p_d)
 {
     s_state = BMS_ST_INIT;
-    s_prev  = BMS_ST_INIT;
     p_d->state         = BMS_ST_INIT;
     p_d->charge_permit = false;
 }
@@ -139,7 +136,6 @@ void bms_fsm_run(bms_data_t *p_d)
     }
 
     p_d->state = s_state;
-    UNUSED_ARG(s_prev);
 }
 
 const char *bms_fsm_state_name(bms_state_t st)

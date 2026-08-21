@@ -8,8 +8,10 @@
  * (CubeMX 가 CAN1_RX0_IRQn 을 NVIC 에 켜 두었지만 ActivateNotification 을 부르지
  *  않으므로 CAN_IER 이 0 이라 실제로 뜨지 않는다 — 의도된 상태다)
  *
- * 모드는 .ioc 가 아니라 bms_cfg.h 의 CFG_CAN_MODE_LOOPBACK 하나가 정한다.
- * 루프백은 송신 프레임이 자기 RX FIFO 로 되돌아와서 상대 노드 없이 경로 전체를 검증한다.
+ * 모드는 NORMAL 고정이고, .ioc 가 아니라 이 파일이 못 박는다 (아래 mode override).
+ * 한때 CFG_CAN_MODE_LOOPBACK 으로 루프백을 고를 수 있었지만 실버스 검증 후 제거했다 —
+ * 루프백은 자기 0x100 을 하트비트로 인정하는 예외가 필요해서, 남겨 두면 실버스 코드에
+ * "EVSE 무응답을 못 잡는 것처럼 보이는" 분기가 섞인다.
  *
  * 트랜시버 SN65HVD230 (EVSE 와 동일 부품) 주의사항:
  *   - VCC 는 3.3V. 5V 를 주면 RXD 가 5V 로 나오고 CANH/CANL 코먼모드가 어긋난다.
@@ -30,8 +32,6 @@
 #include "bms_can.h"
 #include "bms_fault.h"
 #include "dbg.h"
-
-#if (CFG_LINK_TRANSPORT == CFG_LINK_TRANSPORT_CAN)
 
 extern CAN_HandleTypeDef hcan1;         /* CubeMX 생성 (can.c) */
 
@@ -120,18 +120,13 @@ bool bms_can_init(void)
     /* 동작 모드를 bms_cfg.h 로 못 박는다.
      * MX_CAN1_Init() 이 이미 .ioc 값으로 초기화를 끝냈고, 모드는 초기화 시점에만
      * 반영되므로 핸들만 고쳐서는 안 바뀐다 -> 재초기화한다 (아직 Start 전이라 안전). */
-    {
-        const uint32_t want = (CFG_CAN_MODE_LOOPBACK == 1) ? CAN_MODE_LOOPBACK
-                                                           : CAN_MODE_NORMAL;
-        if (hcan1.Init.Mode != want) {
-            hcan1.Init.Mode = want;
-            if (HAL_CAN_Init(&hcan1) != HAL_OK) {
-                DBG_E("CAN re-init failed (mode override)");
-                return false;
-            }
-            DBG_W("CAN mode overridden by bms_cfg.h -> %s",
-                  (CFG_CAN_MODE_LOOPBACK == 1) ? "LOOPBACK" : "NORMAL");
+    if (hcan1.Init.Mode != CAN_MODE_NORMAL) {
+        hcan1.Init.Mode = CAN_MODE_NORMAL;
+        if (HAL_CAN_Init(&hcan1) != HAL_OK) {
+            DBG_E("CAN re-init failed (mode override)");
+            return false;
         }
+        DBG_W("CAN mode overridden -> NORMAL (.ioc 값 무시)");
     }
 
     /* 필터 0 : 마스크 전체 0 = 모든 ID 통과. 분기는 소프트웨어 switch 로 한다.
@@ -163,13 +158,11 @@ bool bms_can_init(void)
     s_ready = true;
     can_report_bitrate();
 
-#if (CFG_CAN_MODE_LOOPBACK == 0)
     /* NORMAL 은 "혼자 켜면 실패하는 것이 정상" 인 모드다. 부팅 로그에 박아 두지 않으면
      * 나중에 Bus-Off 를 보고 멀쩡한 배선을 뜯게 된다. */
     DBG_W("CAN NORMAL : 상대 노드가 ACK 를 줘야 송신이 성립한다.");
     DBG_W("  혼자 켜면 TEC 증가 -> Bus-Off 가 정상 (상대 연결 시 ABOM 자동 복귀)");
     DBG_W("  확인 순서 : (1) Rs 핀 GND  (2) VCC 3.3V  (3) CANH-CANL 60ohm  (4) 공통 GND");
-#endif
     DBG_I("  console : t=frame trace  e=EVSE role  (1초마다 CAN 요약 로그)");
     return true;
 }
@@ -180,6 +173,14 @@ bool bms_can_init(void)
 bool bms_can_is_ready(void)              { return s_ready; }
 void bms_can_set_trace(bool on)          { s_trace = on;   }
 bool bms_can_get_trace(void)             { return s_trace; }
+
+uint16_t bms_can_get_tec(void)
+{
+    if (!s_ready) {
+        return 0U;
+    }
+    return (uint16_t)((hcan1.Instance->ESR & CAN_ESR_TEC_Msk) >> CAN_ESR_TEC_Pos);
+}
 
 void bms_can_log_stats(void)
 {
@@ -202,8 +203,7 @@ void bms_can_log_stats(void)
     lec     = (esr & CAN_ESR_LEC_Msk) >> CAN_ESR_LEC_Pos;
     bus_off = ((esr & CAN_ESR_BOFF) != 0U);
 
-    DBG_I("CAN %s tx:%lu/d%lu rx:%lu/d%lu TEC:%lu REC:%lu LEC:%s%s",
-          (CFG_CAN_MODE_LOOPBACK == 1) ? "LOOP" : "NORM",
+    DBG_I("CAN NORM tx:%lu/d%lu rx:%lu/d%lu TEC:%lu REC:%lu LEC:%s%s",
           (unsigned long)s_tx_cnt,  (unsigned long)s_tx_drop,
           (unsigned long)s_rx_cnt,  (unsigned long)s_rx_drop,
           (unsigned long)tec, (unsigned long)rec, can_lec_name(lec),
@@ -218,49 +218,6 @@ void bms_can_log_stats(void)
         }
         s_was_bus_off = bus_off;
     }
-}
-
-/* ==================================================================
- *  EVSE 역할 흉내 (2보드 테스트에서 상대 보드가 쓴다)
- * ================================================================== */
-void bms_can_sim_evse(bool charge_req, bool estop)
-{
-    uint8_t st[4];
-    uint8_t rq[1];
-
-    if (!s_ready) {
-        return;
-    }
-
-    /* 0x200 : [0] state / [1] relay_on / [2] connected / [3] E-Stop.
-     * [0] 은 EVSE 파트가 정의를 확정하지 않았고 BMS 도 읽지 않으므로 1 로 고정한다.
-     * BMS 가 실제로 보는 것은 [2]/[3] 이다. */
-    st[0] = 1U;
-    st[1] = (uint8_t)(charge_req ? 1U : 0U);    /* EVSE 릴레이도 같이 흉내 */
-    st[2] = 1U;                                 /* 커넥터 체결 */
-    st[3] = (uint8_t)(estop ? 1U : 0U);
-    (void)bms_can_send(CFG_CAN_ID_EVSE_STATUS, st, 4U);
-
-    rq[0] = (uint8_t)(charge_req ? 1U : 0U);
-    (void)bms_can_send(CFG_CAN_ID_EVSE_CHARGE_REQ, rq, 1U);
-}
-
-void bms_can_sim_param(int16_t ot_c10)
-{
-    uint8_t d[4];
-
-    if (!s_ready) {
-        return;
-    }
-
-    d[0] = PARAM_ID_OVER_TEMP;
-    d[1] = (uint8_t)((uint16_t)ot_c10 & 0xFFU);
-    d[2] = (uint8_t)((uint16_t)ot_c10 >> 8);
-    d[3] = PARAM_MAGIC;
-    (void)bms_can_send(CFG_CAN_ID_PARAM_WRITE, d, 4U);
-
-    DBG_W("sim: 0x205 param write -> OT %ld.%ldC (상대 BMS 의 0x105 응답을 볼 것)",
-          (long)(ot_c10 / 10), (long)(ot_c10 % 10));
 }
 
 /* ==================================================================
@@ -389,15 +346,6 @@ static void bms_can_dispatch(uint16_t id, const uint8_t *p_d, uint8_t dlc)
         bms_can_handle_param(p_d, dlc);
         break;
 
-#if (CFG_CAN_MODE_LOOPBACK == 1)
-    case CFG_CAN_ID_MAIN:
-        /* 루프백에서는 자기가 보낸 0x100 이 되돌아온다. 상대 노드 없이도 LINK_TIMEOUT 이
-         * 풀려야 나머지 FSM 을 벤치에서 볼 수 있으므로 자신을 하트비트로 인정한다.
-         * NORMAL 에서는 이 분기를 컴파일에서 뺀다 — 남겨 두면 루프백 전용 예외가
-         * 실버스 코드에 섞여 EVSE 무응답을 못 잡는 것처럼 읽힌다. */
-        bms_fault_notify_link();
-        break;
-#endif
 
     default:
         break;
@@ -469,31 +417,3 @@ void bms_can_clear_evse_state(void)
     s_evse_estop      = false;
     s_evse_fault      = 0U;
 }
-
-#else   /* CFG_LINK_TRANSPORT == CFG_LINK_TRANSPORT_UART */
-
-/* UART 백엔드용 빈 구현. 호출부(bms_app.c)에 #if 를 흩뿌리지 않기 위한 것이다. */
-bool    bms_can_init(void)                                    { return false; }
-bool    bms_can_send(uint16_t id, const uint8_t *p, uint8_t n)
-{
-    UNUSED_ARG(id); UNUSED_ARG(p); UNUSED_ARG(n);
-    return false;
-}
-void    bms_can_poll_rx(void)         { }
-bool    bms_can_evse_charge_req(void) { return false; }
-bool    bms_can_evse_relay_on(void)   { return false; }
-bool    bms_can_evse_connected(void)  { return false; }
-bool    bms_can_evse_estop(void)      { return false; }
-uint8_t bms_can_evse_fault(void)      { return 0U;    }
-void    bms_can_clear_evse_state(void) { }
-bool    bms_can_is_ready(void)         { return false; }
-void    bms_can_set_trace(bool on)     { UNUSED_ARG(on); }
-bool    bms_can_get_trace(void)        { return false; }
-void    bms_can_log_stats(void)        { }
-void    bms_can_sim_evse(bool req, bool estop)
-{
-    UNUSED_ARG(req); UNUSED_ARG(estop);
-}
-void    bms_can_sim_param(int16_t v)   { UNUSED_ARG(v); }
-
-#endif  /* CFG_LINK_TRANSPORT */

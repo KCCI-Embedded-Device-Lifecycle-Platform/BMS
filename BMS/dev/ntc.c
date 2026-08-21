@@ -15,7 +15,7 @@
 #include "hw_adc.h"
 #include "dbg.h"
 
-#define NTC_CH_COUNT        2U
+#define NTC_CH_COUNT        4U
 #define NTC_LUT_SIZE        19U
 #define NTC_LUT_START_C10   (-100)      /* -10.0 C */
 #define NTC_LUT_STEP_C10    50          /*   5.0 C */
@@ -28,7 +28,9 @@ static const uint16_t s_lut_ohm[NTC_LUT_SIZE] = {
      2086,  1760,  1492,  1270           /*  65 ~ 80 */
 };
 
-static const adc_idx_t s_ch[NTC_CH_COUNT] = { ADC_IDX_NTC1, ADC_IDX_NTC2 };
+static const adc_idx_t s_ch[NTC_CH_COUNT] = {
+    ADC_IDX_NTC1, ADC_IDX_NTC2, ADC_IDX_NTC3, ADC_IDX_NTC4
+};
 static int32_t s_temp_c10[NTC_CH_COUNT];
 static int32_t s_res_ohm[NTC_CH_COUNT];
 
@@ -67,7 +69,7 @@ void ntc_init(void)
         s_temp_c10[i] = NTC_TEMP_INVALID;
         s_res_ohm[i]  = 0;
     }
-    DBG_I("ntc init (10k pullup, B3950 LUT)");
+    DBG_I("ntc init (%uch, 10k pullup, B3950 LUT)", (unsigned)NTC_CH_COUNT);
 }
 
 void ntc_update(void)
@@ -103,4 +105,40 @@ int32_t ntc_get_temp_c10(uint8_t idx)
 int32_t ntc_get_res_ohm(uint8_t idx)
 {
     return (idx < NTC_CH_COUNT) ? s_res_ohm[idx] : 0;
+}
+
+/**
+ * @brief  유효 채널의 최댓값(가장 뜨거운 곳)을 돌려준다.
+ *
+ * @note   블랙보드 bms_data_t.temp_c10 이 하나뿐이라 4채널을 하나로 줄여야 한다.
+ *     평균이 아니라 최댓값인 이유: 평균은 한 셀만 뜨거운 국부 발열을 희석시켜
+ *     과온 임계를 못 넘게 만든다. 보호는 항상 최악값 기준이어야 한다.
+ *     단선/단락 채널은 건너뛰므로, 센서 하나가 빠져도 나머지로 보호가 계속된다.
+ */
+int32_t ntc_get_temp_max_c10(void)
+{
+    uint8_t i;
+    int32_t max = NTC_TEMP_INVALID;
+
+    for (i = 0; i < NTC_CH_COUNT; i++) {
+        if (s_temp_c10[i] == NTC_TEMP_INVALID) {
+            continue;
+        }
+        if ((max == NTC_TEMP_INVALID) || (s_temp_c10[i] > max)) {
+            max = s_temp_c10[i];
+        }
+    }
+    return max;
+}
+
+uint8_t ntc_get_valid_count(void)
+{
+    uint8_t i, n = 0;
+
+    for (i = 0; i < NTC_CH_COUNT; i++) {
+        if (s_temp_c10[i] != NTC_TEMP_INVALID) {
+            n++;
+        }
+    }
+    return n;
 }

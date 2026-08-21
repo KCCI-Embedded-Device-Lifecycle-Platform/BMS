@@ -9,7 +9,6 @@ int32_t cell_adc_get_cell_mv(uint8_t idx);          /* 0~3 : Cell1~4     */
 int32_t cell_adc_get_pack_mv(void);                 /* = node[3]         */
 /* 채널별 게인 보정 (Q16 고정소수점, 65536 = x1.0) */
 void    cell_adc_set_gain(uint8_t idx, int32_t gain_q16);
-void    cell_adc_set_offset(uint8_t idx, int32_t off_mv);
 int32_t cell_adc_get_gain(uint8_t idx);
 
 /**

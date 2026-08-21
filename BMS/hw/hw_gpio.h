@@ -10,14 +10,13 @@
  *        (status_led_init() 이 hw_gpio_init() 을 가장 먼저 부른다).
  */
 typedef enum {
-    HW_OUT_LED_RUN = 0,     /* PA5  : 온보드 LD2              */
-    HW_OUT_LED_FAULT,       /* PC8  : Fault LED               */
-    HW_OUT_BUZZER,          /* PC9  : 부저                    */
-    HW_OUT_RELAY_CHG,       /* PA8  : 충전 차단 릴레이 (NO 접점) */
+    HW_OUT_LED_RUN = 0,     /* PA5  : 초록 Power LED (온보드 LD2 와 공용) */
+    HW_OUT_LED_CHARGE,      /* PC6  : 노랑 Charge LED          */
+    HW_OUT_LED_FAULT,       /* PC8  : 빨강 Fault LED           */
+    HW_OUT_RELAY_CHG,       /* PB5  : 충전 차단 릴레이 (NO 접점) */
     HW_OUT_MAX
 } hw_out_t;
 
 void hw_gpio_init(void);
 void hw_gpio_set(hw_out_t ch, bool on);
-void hw_gpio_toggle(hw_out_t ch);
 #endif

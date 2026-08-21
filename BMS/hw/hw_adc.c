@@ -2,14 +2,14 @@
  * @file    hw_adc.c
  * @brief   ADC1 + DMA2_Stream0 (Circular, Scan, Continuous) 드라이버
  *
- * ADC 가 Scan/Continuous 로 8랭크를 계속 돌고 DMA(Circular)가 s_dma_buf[] 를 자동 갱신한다.
- * 스캔이 끝날 때마다 TC 인터럽트가 뜨고, ISR 은 덧셈 8회만 해서 누적기에 더한다
+ * ADC 가 Scan/Continuous 로 10랭크를 계속 돌고 DMA(Circular)가 s_dma_buf[] 를 자동 갱신한다.
+ * 스캔이 끝날 때마다 TC 인터럽트가 뜨고, ISR 은 덧셈 10회만 해서 누적기에 더한다
  * (ISR 최소 연산 원칙). CFG_ADC_OVERSAMPLE_N(16)회 누적되면 평균을 확정한다 —
  * STM32F4 에는 하드웨어 오버샘플링이 없어 소프트웨어로 구현한 것이고,
  * 16회 평균이면 랜덤 노이즈가 1/4 로 줄어든다 (유효 2bit 증가).
  *
  * @note    타이밍: ADCCLK = PCLK2(84MHz)/8 = 10.5MHz
- *          채널당 (480+12)/10.5MHz = 46.9us -> 1스캔 375us -> 평균 갱신 6ms.
+ *          채널당 (480+12)/10.5MHz = 46.9us -> 1스캔 469us -> 평균 갱신 7.5ms.
  *          100ms 태스크에 충분하다.
  */
 #include "hw_adc.h"

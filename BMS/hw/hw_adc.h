@@ -6,7 +6,8 @@
  * @brief  ADC1 변환 랭크 인덱스
  * @warning CubeMX 의 Rank 순서와 반드시 1:1 로 일치해야 한다.
  *          Rank1=IN0, Rank2=IN1, Rank3=IN4, Rank4=IN8,
- *          Rank5=IN11, Rank6=IN10, Rank7=IN12, Rank8=Vrefint
+ *          Rank5=IN11, Rank6=IN10, Rank7=IN13, Rank8=IN14,
+ *          Rank9=IN12, Rank10=Vrefint
  */
 typedef enum {
     ADC_IDX_NODE_B1 = 0,    /* PA0  IN0  : 셀1 누적    */
@@ -15,6 +16,8 @@ typedef enum {
     ADC_IDX_NODE_BP,        /* PB0  IN8  : 팩 전압     */
     ADC_IDX_NTC1,           /* PC1  IN11 : 온도1       */
     ADC_IDX_NTC2,           /* PC0  IN10 : 온도2       */
+    ADC_IDX_NTC3,           /* PC3  IN13 : 온도3       */
+    ADC_IDX_NTC4,           /* PC4  IN14 : 온도4       */
     ADC_IDX_ACS712,         /* PC2  IN12 : 홀 전류     */
     ADC_IDX_VREFINT,        /*      IN17 : VDDA 보정   */
     ADC_IDX_MAX

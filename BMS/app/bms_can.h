@@ -66,18 +66,13 @@ bool    bms_can_get_trace(void);
 void    bms_can_log_stats(void);
 
 /**
- * @brief  EVSE 상태(0x200) + 충전 요청(0x201) 1회 송신 - EVSE 역할 흉내
- * @note   같은 펌웨어를 올린 Nucleo 한 장을 'e' 로 EVSE 역할로 돌리면 실버스 2노드가
- *         성립한다. s_link_sim('p')과 달리 필터->FIFO->디스패치 경로를 전부 실제로 탄다.
- * @warning 이 프레임을 내보내는 보드는 BMS 프레임 송신을 멈춰야 한다. 같은 ID 를 두
- *         노드가 실으면 데이터 구간에서 비트 에러가 터진다 (호출부가 배타적으로 다룬다).
+ * @brief  송신 에러 카운터(TEC) 현재값
+ * @note   log_stats 는 1초 요약이라 "릴레이가 닫히는 그 100ms 에 TEC 가 튀었는가" 를
+ *         볼 수 없다. 셀 ADC 기준전위와 CAN 차동버스는 서로 무관한 두 계통이므로,
+ *         릴레이 개폐에 둘이 같이 흔들린다면 공통분모는 접지뿐이다 — 그 상관을
+ *         같은 줄에서 보려고 카운터만 별도로 연다 (ESR 해석은 여전히 이 파일 안에 둔다).
  */
-void    bms_can_sim_evse(bool charge_req, bool estop);
+uint16_t bms_can_get_tec(void);
 
-/**
- * @brief  파라미터 쓰기(0x205) 1회 송신 - 과온 임계 변경 요청
- * @note   상대 BMS 가 클램프한 실제 적용값을 0x105 로 되돌려 준다.
- */
-void    bms_can_sim_param(int16_t ot_c10);
 
 #endif /* __BMS_CAN_H_ */

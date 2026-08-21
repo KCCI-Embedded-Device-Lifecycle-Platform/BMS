@@ -25,6 +25,10 @@ static fault_ctx_t s_ctx[8];        /* 비트 위치별 컨텍스트 */
 static uint32_t    s_link_last_ms;
 static uint16_t    s_prev_fault;
 
+/* 이번 판정에서 임계를 넘긴 첫 셀 인덱스 (0xFF = 없음). 로그 전용. */
+static uint8_t     s_ov_idx = 0xFFU;
+static uint8_t     s_uv_idx = 0xFFU;
+
 /* 과온 임계만 런타임 변경 대상(CAN 0x205)이라 RAM 으로 승격한다.
  * 나머지 임계값은 여전히 컴파일 타임 상수다. */
 static int32_t     s_th_over_temp_c10     = CFG_OVER_TEMP_C10;
@@ -118,10 +122,17 @@ void bms_fault_check(bms_data_t *p_d)
     uint16_t flt = p_d->fault;
 
     /* ---------- 1) 셀 과전압 / 저전압 ---------- */
+    /* 어느 셀이 넘겼는지를 같이 남긴다. "CELL_OV" 라는 이름만으로는 4개 중 무엇인지
+     * 알 수 없고, 셀1 은 차분이 아니라 node1 그 자체라 원인 계통이 아예 다르다
+     * (셀1 만 넘으면 기준전위 이동, 셀2~4 면 실제 셀 전압). */
+    s_ov_idx = 0xFFU;
+    s_uv_idx = 0xFFU;
     for (i = 0; i < BMS_CELL_COUNT; i++) {
-        if (p_d->cell_mv[i] > CFG_CELL_OV_MV)      { ov_set = true; }
+        if (p_d->cell_mv[i] > CFG_CELL_OV_MV)      { ov_set = true;
+                                                     if (s_ov_idx == 0xFFU) { s_ov_idx = i; } }
         if (p_d->cell_mv[i] >= CFG_CELL_OV_CLR_MV) { ov_clr = false; }
-        if (p_d->cell_mv[i] < CFG_CELL_UV_MV)      { uv_set = true; }
+        if (p_d->cell_mv[i] < CFG_CELL_UV_MV)      { uv_set = true;
+                                                     if (s_uv_idx == 0xFFU) { s_uv_idx = i; } }
         if (p_d->cell_mv[i] <= CFG_CELL_UV_CLR_MV) { uv_clr = false; }
     }
     fault_eval(0, ov_set, ov_clr, CFG_FAULT_CLEAR_HOLD_MS, &flt, BMS_FLT_CELL_OV);
@@ -182,6 +193,30 @@ void bms_fault_check(bms_data_t *p_d)
               s_prev_fault, flt,
               bms_fault_name(rise), bms_fault_name(fall),
               (int)p_d->charge_permit);
+
+        /* --- 셀 Fault 가 새로 걸리면 판정에 쓴 원값을 그 자리에서 남긴다 ---
+         * 1초 요약 로그로는 이걸 절대 못 본다. 트립하면 FSM 이 같은 슬롯에서 릴레이를
+         * 다시 열고, 열리면 값이 원래대로 돌아와서 요약에는 "임계 이하" 만 남는다.
+         * ("CELL_OV 인데 로그의 셀 전압은 4200 미만" 으로 보이는 이유가 이것이다)
+         *
+         * node 를 같이 찍는 이유: cell1 = node1 그 자체(GND 기준)이고 cell2~4 만
+         * 차분이다. 기준전위가 밀리면 셀1 에만 통째로 실리고 나머지는 상쇄된다. */
+        if (FLAG_IS_SET(rise, (uint16_t)(BMS_FLT_CELL_OV | BMS_FLT_CELL_UV))) {
+            uint8_t idx = (s_ov_idx != 0xFFU) ? s_ov_idx : s_uv_idx;
+
+            DBG_W("  >> cell%u 가 임계를 넘겼다 (OV>%d / UV<%d)",
+                  (unsigned)(idx + 1U), CFG_CELL_OV_MV, CFG_CELL_UV_MV);
+            DBG_W("  cell mV: %ld / %ld / %ld / %ld",
+                  (long)p_d->cell_mv[0], (long)p_d->cell_mv[1],
+                  (long)p_d->cell_mv[2], (long)p_d->cell_mv[3]);
+            DBG_W("  node mV: %ld / %ld / %ld / %ld   (VDDA %ld mV)",
+                  (long)p_d->node_mv[0], (long)p_d->node_mv[1],
+                  (long)p_d->node_mv[2], (long)p_d->node_mv[3],
+                  (long)p_d->vdda_mv);
+            if (idx == 0U) {
+                DBG_W("  cell1 은 차분이 아니다 -> 접지/기준전위 이동을 먼저 의심할 것");
+            }
+        }
         s_prev_fault = flt;
     }
 }

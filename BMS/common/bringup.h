@@ -14,7 +14,7 @@
 /* 이 스위치는 "팩 전류 센서를 쓸 것인가" 만 결정한다.
  * 칩은 INA226 하나로 고정이다 (2026-08-14 모듈 입고, INA219 경로 제거).
  * 다른 칩으로 갈아탈 일이 생기면 고칠 곳은 dev/pack_sensor.h 다. */
-#define BRINGUP_S3_PACK_SENSOR  1  /* 팩 전압/전류 I2C              (INA226) */
+#define BRINGUP_S3_PACK_SENSOR  0  /* 팩 전압/전류 I2C              (INA226) */
 #define BRINGUP_S4_NTC_ACS      0   /* 온도 + 전류 크로스체크        (NTC, ACS712) */
 #define BRINGUP_S5_OLED         1   /* 로컬 표시                     (SSD1306) */
 #define BRINGUP_S6_LINK         1   /* 상태 프레임 송신 (UART->CAN)  */

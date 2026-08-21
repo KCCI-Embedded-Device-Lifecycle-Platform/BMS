@@ -10,7 +10,12 @@
  * @warning 차분이 오차를 증폭한다. Cell4 = 16.8V - 12.6V 처럼 큰 값끼리 빼서 작은 값을
  *      얻으므로, 노드 1% 오차(16.8V x 1% = 168mV)가 4.2V 짜리 셀에 그대로 실린다.
  *      그 상태로는 OV 임계 4.20 vs 4.25V(50mV)를 구분할 수 없다.
- *      -> 0.1% 저항 + 채널별 캘리브레이션(gain_q16 / off_mv)이 전제다.
+ *      -> 0.1% 저항 + 채널별 게인 캘리브레이션(gain_q16)이 전제다.
+ *
+ * @note 오프셋 보정은 일부러 두지 않는다. 이 회로의 지배 오차는 분압 저항 공차(곱셈성)라
+ *      16.8V 에서 168mV 인데, ADC 오프셋 기여분은 x6 을 먹어도 20mV 수준이다.
+ *      2점 보정을 하려면 0V 근처 두 번째 점이 필요하고 스택 분압에서 그건 노드를
+ *      단락시켜야 해서 벤치에서 위험하다. 지배 오차만 정확히 잡는 쪽이 낫다.
  */
 #include "cell_adc.h"
 #include "hw_adc.h"
@@ -20,7 +25,6 @@ typedef struct {
     int32_t node_mv[BMS_CELL_COUNT];
     int32_t cell_mv[BMS_CELL_COUNT];
     int32_t gain_q16[BMS_CELL_COUNT];
-    int32_t off_mv[BMS_CELL_COUNT];
 } cell_adc_ctx_t;
 
 static cell_adc_ctx_t s_ctx;
@@ -37,7 +41,6 @@ void cell_adc_init(void)
     memset(&s_ctx, 0, sizeof(s_ctx));
     for (i = 0; i < BMS_CELL_COUNT; i++) {
         s_ctx.gain_q16[i] = 65536;      /* x1.000 : 캘리브레이션 전 기본값 */
-        s_ctx.off_mv[i]   = 0;
     }
     DBG_I("cell_adc init (divider x%ld.%03ld)",
           (long)(CFG_DIV_SCALE_X1000 / 1000), (long)(CFG_DIV_SCALE_X1000 % 1000));
@@ -57,10 +60,10 @@ void cell_adc_update(void)
          *    중간값 3,300,000uV x 6000 = 1.98e10 이라 int32 를 넘는다 -> int64 승격. */
         node_uv = (int32_t)(((int64_t)pin_uv * CFG_DIV_SCALE_X1000) / 1000L);
 
-        /* 3) gain(Q16) 적용 후 offset 보정 (int64 로 중간 오버플로 차단) */
+        /* 3) 채널 게인(Q16) 적용 (int64 로 중간 오버플로 차단) */
         node_uv = (int32_t)(((int64_t)node_uv * s_ctx.gain_q16[i]) >> 16);
 
-        s_ctx.node_mv[i] = DIV_ROUND(node_uv, 1000L) + s_ctx.off_mv[i];
+        s_ctx.node_mv[i] = DIV_ROUND(node_uv, 1000L);
     }
 
     /* 4) 차분으로 셀 전압 산출 */
@@ -92,12 +95,6 @@ void cell_adc_set_gain(uint8_t idx, int32_t gain_q16)
     }
 }
 
-void cell_adc_set_offset(uint8_t idx, int32_t off_mv)
-{
-    if (idx < BMS_CELL_COUNT) {
-        s_ctx.off_mv[idx] = off_mv;
-    }
-}
 
 int32_t cell_adc_get_gain(uint8_t idx)
 {
@@ -142,6 +139,5 @@ void cell_adc_reset_cal(void)
     uint8_t i;
     for (i = 0; i < BMS_CELL_COUNT; i++) {
         s_ctx.gain_q16[i] = 65536;
-        s_ctx.off_mv[i]   = 0;
     }
 }

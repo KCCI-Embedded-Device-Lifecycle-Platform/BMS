@@ -74,7 +74,3 @@ void bms_soc_update(bms_data_t *p_d)
     p_d->soc = (uint8_t)CLAMP(DIV_ROUND(s_soc_x100, 100), 0, 100);
 }
 
-uint8_t bms_soc_get(void)
-{
-    return (uint8_t)CLAMP(DIV_ROUND(s_soc_x100, 100), 0, 100);
-}

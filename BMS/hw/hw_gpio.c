@@ -21,11 +21,14 @@ typedef struct {
     GPIO_PinState active;       /* 액티브 레벨 */
 } hw_pin_map_t;
 
+/* LED 3색은 전부 애노드를 핀에, 캐소드를 저항 거쳐 GND 로 (액티브 High) 전제한다.
+ * 공통 애노드 모듈(액티브 Low)을 쓰면 여기만 GPIO_PIN_RESET 으로 바꾸면 된다 —
+ * status_led.c 는 "논리적 점등" 만 다루므로 한 줄도 안 바뀐다. */
 static const hw_pin_map_t s_map[HW_OUT_MAX] = {
-    /* HW_OUT_LED_RUN   */ { GPIOA, GPIO_PIN_5, GPIO_PIN_SET       },
-    /* HW_OUT_LED_FAULT */ { GPIOC, GPIO_PIN_8, GPIO_PIN_SET       },
-    /* HW_OUT_BUZZER    */ { GPIOC, GPIO_PIN_9, GPIO_PIN_SET       },
-    /* HW_OUT_RELAY_CHG */ { GPIOA, GPIO_PIN_8, RELAY_ACTIVE_LEVEL },
+    /* HW_OUT_LED_RUN    */ { GPIOA, GPIO_PIN_5, GPIO_PIN_SET       },
+    /* HW_OUT_LED_CHARGE */ { GPIOC, GPIO_PIN_6, GPIO_PIN_SET       },
+    /* HW_OUT_LED_FAULT  */ { GPIOC, GPIO_PIN_8, GPIO_PIN_SET       },
+    /* HW_OUT_RELAY_CHG  */ { GPIOB, GPIO_PIN_5, RELAY_ACTIVE_LEVEL },
 };
 
 void hw_gpio_init(void)
@@ -48,10 +51,3 @@ void hw_gpio_set(hw_out_t ch, bool on)
     HAL_GPIO_WritePin(s_map[ch].port, s_map[ch].pin, lv);
 }
 
-void hw_gpio_toggle(hw_out_t ch)
-{
-    if (ch >= HW_OUT_MAX) {
-        return;
-    }
-    HAL_GPIO_TogglePin(s_map[ch].port, s_map[ch].pin);
-}
