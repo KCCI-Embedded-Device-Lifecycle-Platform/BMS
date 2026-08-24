@@ -5,8 +5,8 @@
  * RTOS 없이 주기 슬롯만 돌린다. 각 태스크가 짧고 블로킹이 없어서 RTOS 오버헤드가
  * 필요 없고, 실행 순서가 고정이라 타이밍 분석이 쉽다.
  *
- *   100ms : 셀 ADC, 팩 센서, Fault, FSM, 릴레이, 0x100/0x103
- *   500ms : NTC, ACS712, OLED, 0x101/0x102
+ *   100ms : 셀 ADC, 팩 센서, ACS712, Fault, FSM, 릴레이, 0x100/0x103
+ *   500ms : NTC, OLED, 0x101/0x102
  *   1000ms: SOC, 0x104, 콘솔 요약
  *
  * 측정 -> 판단 -> 송신이 같은 100ms 슬롯 안에서 끝나므로
@@ -39,6 +39,19 @@ static bms_data_t s_bms;
 
 static uint32_t s_t100, s_t500, s_t1000;
 
+/* TEMP RELAY STATIC TEST -------------------------------------------------
+ * 1: EVSE/FSM/permit conditions are bypassed and the relay follows only
+ *    s_relay_static_test_on.  BRINGUP_S8_RELAY still controls the real PB5
+ *    output.  Keep this false at boot and remove this block after testing.
+ *
+ * Debugger live test: change s_relay_static_test_on in the watch window.
+ * Source test       : change false below to true, then rebuild/flash.
+ * ---------------------------------------------------------------------- */
+#define RELAY_STATIC_TEST_ENABLE       0
+#if (RELAY_STATIC_TEST_ENABLE == 1)
+static volatile bool s_relay_static_test_on = false;
+#endif
+
 /* 자가진단은 init(끝)과 콘솔 's' 두 곳에서 불린다. 정의는 init 바로 앞에 두어
  * "부팅 마지막 단계" 라는 순서를 코드 배치로도 드러낸다. */
 static void ap_selfcheck(void);
@@ -48,8 +61,17 @@ static void ap_collect(void)
 {
     uint8_t i;
     int32_t mx, mn;
+    bool measure_ok = hw_adc_is_fresh(50U);
 
     s_bms.vdda_mv = hw_adc_get_vdda_mv();
+
+#if (BRINGUP_S4_NTC_ACS == 1)
+    /* ACS712 는 계산만 하므로 100ms 에 돌린다. INA226(0.1ohm)이 819mA에서
+     * 포화하면 이 값이 과전류 판단과 CAN 전류를 이어받는다. */
+    acs712_update();
+    s_bms.acs_ma = acs712_get_ma();
+    measure_ok &= acs712_is_ok() && (ntc_get_valid_count() > 0U);
+#endif
 
 #if (BRINGUP_S2_CELL_ADC == 1)
     cell_adc_update();
@@ -57,6 +79,9 @@ static void ap_collect(void)
         s_bms.node_mv[i] = cell_adc_get_node_mv(i);
         s_bms.cell_mv[i] = cell_adc_get_cell_mv(i);
     }
+    /* 릴레이가 열려 있어도 항상 살아 있는 보호보드 B+가 배터리 PACK 전압의 기준이다.
+     * INA226은 현재 EVSE -> INA -> ACS -> 릴레이 -> 배터리 순서라, Bus Voltage가
+     * 릴레이 바깥 EVSE 측 전압이다. 그 값으로 pack_mv를 덮으면 충전 대기 중 PACK=0V가 된다. */
     s_bms.pack_mv = cell_adc_get_pack_mv();
 
     mx = s_bms.cell_mv[0];
@@ -74,10 +99,23 @@ static void ap_collect(void)
 
 #if (BRINGUP_S3_PACK_SENSOR == 1)
     if (pack_sensor_update()) {
-        s_bms.pack_mv = pack_sensor_get_bus_mv();   /* 션트 센서 값을 우선 채택 */
+        s_bms.evse_bus_mv = pack_sensor_get_bus_mv();
         s_bms.pack_ma = pack_sensor_get_current_ma();
+        s_bms.pack_current_saturated = pack_sensor_is_saturated();
+#if (BRINGUP_S4_NTC_ACS == 1)
+        if (s_bms.pack_current_saturated && acs712_is_ok()) {
+            s_bms.pack_ma = s_bms.acs_ma;
+        }
+#endif
+    } else {
+        s_bms.evse_bus_mv = 0;
+        s_bms.pack_ma = 0;
+        s_bms.pack_current_saturated = false;
+        measure_ok = false;
     }
 #endif
+
+    s_bms.sensor_ready = measure_ok;
 
     /* EVSE 수신 상태 -> 블랙보드. FSM 이 bms_can.h 를 직접 알지 않게 하는 유일한 통로다. */
 #if (BRINGUP_S6_LINK == 1)
@@ -180,7 +218,7 @@ static void ap_relay_window_trace(void)
 
 
 /**
- * @brief  충전 차단 릴레이(PA8) 지령
+ * @brief  충전 차단 릴레이(PB5) 지령
  * @note   permit 은 "배터리가 받아도 되는가"만 답한다. 접점을 닫으려면 EVSE 가 실제로
  *         요청했고 FSM 이 충전 구간에 있어야 한다 — permit 만 보면 아무도 요청하지 않은
  *         IDLE 에서 접점이 붙는다. FSM 이 이미 permit=0 을 강제하므로 사실상 삼중이지만,
@@ -188,14 +226,24 @@ static void ap_relay_window_trace(void)
  */
 static void ap_relay_update(void)
 {
+#if (RELAY_STATIC_TEST_ENABLE == 1)
+    bool on = s_relay_static_test_on;
+#else
     bool on = s_bms.charge_permit
               && ((s_bms.state == BMS_ST_CHARGE_READY) || (s_bms.state == BMS_ST_CHARGING));
+#endif
 
     if (on != s_bms.relay_on) {
+#if (RELAY_STATIC_TEST_ENABLE == 1)
+        DBG_W("RELAY STATIC TEST %s%s",
+              on ? "CLOSE" : "OPEN",
+              (BRINGUP_S8_RELAY == 1) ? "" : "  [OUTPUT DISABLED]");
+#else
         DBG_W("RELAY %s (permit=%d state=%s)%s",
               on ? "CLOSE" : "OPEN", (int)s_bms.charge_permit,
               bms_fsm_state_name(s_bms.state),
               (BRINGUP_S8_RELAY == 1) ? "" : "  [OUTPUT DISABLED]");
+#endif
         ap_relay_window_arm(on);      /* 개폐 전후 원값을 남긴다 (RLYW 트레이스) */
         s_bms.relay_on = on;
     }
@@ -244,9 +292,7 @@ static void ap_task_500ms(void)
 {
 #if (BRINGUP_S4_NTC_ACS == 1)
     ntc_update();
-    acs712_update();
     s_bms.temp_c10 = ntc_get_temp_max_c10();
-    s_bms.acs_ma   = acs712_get_ma();
 #endif
 
 #if (BRINGUP_S5_OLED == 1)
@@ -257,6 +303,77 @@ static void ap_task_500ms(void)
     bms_link_send_cell(&s_bms);
 #endif
 }
+
+/* 아래 둘은 1초 요약 로그 전용이다. 호출부(ap_task_1000ms)와 같은 스위치로 묶어 둔다 —
+ * S1=0 이면 호출부가 통째로 사라지므로 정의만 남으면 -Wunused-function 이 뜬다. */
+#if (BRINGUP_S1_LED_DBG == 1)
+
+/**
+ * @brief  INA226 전류 경로가 정상인지
+ * @note   PACK 전압은 항상 셀 ADC B+에서 오므로 INA226이 죽어도 전압만 보면 티가 안 난다.
+ *         전류 센서 실패를 요약 로그 끝에 별도로 표시해 보호 경로 상실을 숨기지 않는다.
+ */
+static bool ap_pack_current_is_degraded(void)
+{
+#if (BRINGUP_S3_PACK_SENSOR == 1)
+    return !pack_sensor_is_ok();
+#else
+    return true;
+#endif
+}
+
+/* ==================================================================
+ *  1초 요약 로그 — 표 형식
+ *
+ *  값을 고정 열에 박고 10줄마다 헤더를 다시 찍는다. 예전에는 한 줄에
+ *  "C:.../... PACK:... T:... SOC:..." 를 이어 붙였는데, 자릿수가 바뀔 때마다
+ *  뒤쪽 항목이 통째로 밀려서 **줄끼리 세로 비교가 안 됐다.** 무엇이 변했는지
+ *  보려면 매 줄을 처음부터 다시 읽어야 했고, 그게 로그가 어지럽던 실제 이유다.
+ *  열을 고정하면 눈이 한 열만 따라 내려가면 된다.
+ *
+ *  헤더를 주기적으로 다시 찍는 이유: 터미널을 스크롤하면 맨 위 헤더가 사라져
+ *  숫자 덩어리만 남는다. 10줄(=10초)이면 한 화면에 항상 헤더가 하나는 보인다.
+ * ================================================================== */
+#define SUMMARY_HDR_EVERY   10U     /* 10줄마다 헤더 재출력 */
+
+static uint8_t s_sum_row;
+
+static void ap_log_summary(void)
+{
+    /* 헤더 문자열은 아래 포맷의 각 필드 폭과 1:1 로 맞춰져 있다.
+     * 포맷을 고치면 이 줄도 같이 고칠 것 — 어긋나면 표가 아니라 그냥 숫자 나열이 된다. */
+    if ((s_sum_row % SUMMARY_HDR_EVERY) == 0U) {
+        DBG_I("state    cell1 cell2 cell3 cell4  packmV     mA     T  SOC FLT      P R");
+    }
+    s_sum_row++;
+
+    {
+        /* Fault 는 이름으로 찍는다. 16진 마스크(0x0040)를 매번 머리로 디코드하는
+         * 비용이 컸다. bms_fault_name() 은 최상위 1개만 돌려주므로, 2개 이상 걸렸으면
+         * '+' 를 붙여 "더 있다" 를 알린다 — 전체 마스크는 Fault 가 바뀌는 순간
+         * bms_fault.c 가 old->new 로 이미 찍으므로 여기서 중복할 필요가 없다. */
+        const char *p_flt  = (s_bms.fault == 0U) ? "-" : bms_fault_name(s_bms.fault);
+        bool        multi  = (s_bms.fault != 0U) &&
+                             ((s_bms.fault & (uint16_t)(s_bms.fault - 1U)) != 0U);
+        char        flt[10];
+
+        (void)snprintf(flt, sizeof(flt), "%s%s", p_flt, multi ? "+" : "");
+
+        DBG_I("%-8s %5ld %5ld %5ld %5ld %7ld %6ld %5s %4u %-8s %d %d%s",
+              bms_fsm_state_name(s_bms.state),
+              (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
+              (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
+              (long)s_bms.pack_mv, (long)s_bms.pack_ma,
+              dbg_temp(s_bms.temp_c10), s_bms.soc,
+              flt, (int)s_bms.charge_permit, (int)s_bms.relay_on,
+              /* PACK은 항상 셀 ADC B+다. INA226 실패는 전압 출처가 아니라
+               * 전류 보호 경로 상실이므로 별도 꼬리표로 드러낸다. */
+              ap_pack_current_is_degraded() ? "  <INA ERR>" :
+              (s_bms.pack_current_saturated ? "  <I=ACS712>" : ""));
+    }
+}
+
+#endif /* BRINGUP_S1_LED_DBG */
 
 static void ap_task_1000ms(void)
 {
@@ -273,22 +390,7 @@ static void ap_task_1000ms(void)
 
     /* --- 콘솔 요약 로그 --- */
 #if (BRINGUP_S1_LED_DBG == 1)
-    /* PACK 의 출처를 표시한다. 팩 센서 읽기가 실패하면 ap_collect() 가 셀 ADC 합계를
-     * 그대로 두는데, 둘 다 "그럴듯한 팩 전압" 이라 로그만 봐서는 구분이 안 된다.
-     * 실제로 이것 때문에 INA226 이 25분간 죽어 있는 줄 모르고 지나갔다. */
-#if (BRINGUP_S3_PACK_SENSOR == 1)
-    const char *p_pack_src = pack_sensor_is_ok() ? "" : "(cellADC)";
-#else
-    const char *p_pack_src = "(cellADC)";
-#endif
-
-    DBG_I("[%s] C:%ld/%ld/%ld/%ld mV  PACK:%ldmV%s %ldmA  T:%ld.%ldC  SOC:%u%%  FLT:0x%04X P:%d RLY:%d",
-          bms_fsm_state_name(s_bms.state),
-          (long)s_bms.cell_mv[0], (long)s_bms.cell_mv[1],
-          (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
-          (long)s_bms.pack_mv, p_pack_src, (long)s_bms.pack_ma,
-          (long)(s_bms.temp_c10 / 10), (long)(s_bms.temp_c10 % 10),
-          s_bms.soc, s_bms.fault, (int)s_bms.charge_permit, (int)s_bms.relay_on);
+    ap_log_summary();
 #endif
 }
 
@@ -326,6 +428,54 @@ static void ap_cal_dump(void)
               i, (long)cell_adc_get_gain(i), i + 1U, (long)cell_adc_get_node_mv(i));
     }
     DBG_I("--- 값을 굳히려면 위 4줄을 cell_adc_init() 끝에 넣을 것 ---");
+}
+
+/**
+ * @brief  가드레일에 걸린 캘리브레이션을 "그럼 실제 분압비는 얼마인가" 로 되돌려준다
+ *
+ * ±25% 밖은 게인으로 흡수하면 안 되는 값이다. 다만 거부만 하고 끝내면 원인 추적이
+ * 통째로 사용자 몫으로 남는데, 이 상태의 증상은 셀 쪽 고장으로만 보인다
+ * (node3 배율만 어긋났을 때 cell3=+10.4V / cell4=-2.3V 로 나왔다. 합은 맞아서
+ *  pack 은 멀쩡해 보이고, 이웃 셀까지 반대 부호로 틀리니 어느 노드인지도 안 보인다).
+ * 그래서 핀 실측에서 배율을 역산해 찍어 준다 — 그대로 bms_cfg.h 에 옮겨 적으면 된다.
+ * 자동 반영하지 않는 것도 의도다: 분압비는 하드웨어 사실이라 RAM 에 두면 안 된다.
+ */
+static void ap_cal_report_reject(uint8_t idx, int32_t actual_mv)
+{
+    int32_t div_now  = cell_adc_get_div_x1000(idx);
+    int32_t div_real = cell_adc_measure_div_x1000(idx, actual_mv);
+    int32_t r_bot;
+
+    DBG_E("cal: node%u 거부 (측정 %ld mV / 요청 %ld mV) — 게인으로 덮을 폭이 아니다",
+          idx + 1U, (long)cell_adc_get_node_mv(idx), (long)actual_mv);
+    DBG_E("  핀 실측 %ld uV (raw %u) / 설정 배율 x%ld.%03ld",
+          (long)cell_adc_get_pin_uv(idx), cell_adc_get_raw(idx),
+          (long)(div_now / 1000), (long)(div_now % 1000));
+
+    /* 포화가 먼저다. 이 상태에서 배율을 역산하면 VDDA 대비 비율이 나오는데
+     * 그럴듯한 숫자라 설정에 옮겨 적기 쉽고, 그러면 오차가 영구히 굳는다. */
+    if (cell_adc_is_railed(idx)) {
+        DBG_E("  !! ADC 포화 (raw=%u) — 핀 전압이 VDDA 이상이다. 분압비 계산 불가",
+              cell_adc_get_raw(idx));
+        DBG_E("     분압기 하단 저항 개방 / 분압비가 너무 작음 / 노드를 잘못 물림");
+        DBG_E("     STM32 핀 전압을 직접 재서 VDDA 아래로 내리는 것이 먼저다");
+        return;
+    }
+
+    if ((div_real <= 1000) || (actual_mv < 500)) {
+        /* 핀이 0V 거나 배율이 1 이하 = 분압기가 아니라 결선/노드 번호 문제다.
+         * 여기서 배율을 계산해 주면 오히려 잘못된 값을 굳히게 만든다. */
+        DBG_E("  배율로 설명되지 않는다 -> 노드 번호 / 배선 / 핀 결선부터 확인");
+        return;
+    }
+
+    r_bot = (int32_t)(((int64_t)CFG_DIV_R_TOP_OHM * 1000LL) / (int64_t)(div_real - 1000L));
+    DBG_E("  요청값이 맞다면 실제 배율은 x%ld.%03ld (상단 %ldk 기준 하단 ~%ld ohm)",
+          (long)(div_real / 1000), (long)(div_real % 1000),
+          (long)(CFG_DIV_R_TOP_OHM / 1000L), (long)r_bot);
+    DBG_E("  -> bms_cfg.h CFG_DIV_SCALE_X1000_LIST 의 node%u 줄을 %ld 로 고치고 리빌드",
+          idx + 1U, (long)div_real);
+    DBG_E("     (반영 뒤에는 'x' 로 게인을 초기화한 다음 'k' 로 다시 미세보정할 것)");
 }
 
 static void ap_console_cal(uint8_t ch)
@@ -371,9 +521,9 @@ static void ap_console_cal(uint8_t ch)
         DBG_W("cal: node%u = %ld mV 적용, gain=%ld/65536",
               s_cal_node + 1U, (long)s_cal_acc, (long)cell_adc_get_gain(s_cal_node));
     } else {
-        /* 가드레일에 걸린 것. 대개 노드를 잘못 짚었거나 배선이 안 붙어 있다. */
-        DBG_E("cal: 거부 (측정 %ld mV / 요청 %ld mV) - 노드 번호와 배선 확인",
-              (long)cell_adc_get_node_mv(s_cal_node), (long)s_cal_acc);
+        /* 가드레일에 걸린 것. 노드를 잘못 짚었거나, 그 노드의 분압비가 설정과 다르다.
+         * 후자가 훨씬 찾기 어려우므로 실제 배율을 역산해서 같이 찍는다. */
+        ap_cal_report_reject(s_cal_node, s_cal_acc);
     }
     s_con_mode = (uint8_t)CON_NORMAL;
 }
@@ -419,13 +569,24 @@ static void ap_console(void)
                           (long)hw_adc_raw_to_uv(raw[i]));
                 }
                 DBG_I("VDDA = %ld mV", (long)hw_adc_get_vdda_mv());
+#if (BRINGUP_S2_CELL_ADC == 1)
+                /* 채널 raw 만으로는 "핀 전압이 이상한가" 와 "복원 배율이 실물과
+                 * 다른가" 가 구분되지 않는다. 노드마다 셋을 한 줄에 붙여 찍는다. */
+                for (i = 0; i < BMS_CELL_COUNT; i++) {
+                    DBG_I("node%u raw=%4u pin=%ld uV x%ld.%03ld -> %ld mV%s",
+                          i + 1U, cell_adc_get_raw(i), (long)cell_adc_get_pin_uv(i),
+                          (long)(cell_adc_get_div_x1000(i) / 1000),
+                          (long)(cell_adc_get_div_x1000(i) % 1000),
+                          (long)cell_adc_get_node_mv(i),
+                          cell_adc_is_railed(i) ? "  !! 포화" : "");
+                }
+#endif
 #if (BRINGUP_S4_NTC_ACS == 1)
                 /* 블랙보드에는 최댓값 하나만 남으므로, 어느 채널이 단선이고
                  * 어느 채널이 튀는지는 여기서만 보인다. */
                 for (i = 0; i < 4U; i++) {
-                    DBG_I("ntc[%u] %ld.%ldC  R=%ld ohm", i,
-                          (long)(ntc_get_temp_c10(i) / 10),
-                          (long)(ntc_get_temp_c10(i) % 10),
+                    DBG_I("ntc[%u] %sC  R=%ld ohm", i,
+                          dbg_temp(ntc_get_temp_c10(i)),
                           (long)ntc_get_res_ohm(i));
                 }
                 DBG_I("ntc valid = %u/4", ntc_get_valid_count());
@@ -440,21 +601,21 @@ static void ap_console(void)
         case 'i': case 'I':                     /* 팩 전류 센서 재초기화 + 즉시 1회 읽기 */
             /* "init 성공" 과 "값이 실제로 들어온다" 는 다른 사실이다.
              * init 은 CONFIG write-verify 까지만 보는데, 주기 읽기는 그 뒤에 따로 죽을 수
-             * 있고 한 번 죽으면 s_ok=false 로 조용히 포기한다. 그러면 로그에는
-             * "INA226 ok" 만 남고 PACK 값은 셀 ADC 합계에서 안 변해서, 되는 것처럼 보인다.
-             * 그 둘을 한 키로 갈라 주지 않으면 여기서 반드시 막힌다. */
+             * 있다. PACK 전압은 셀 ADC B+에서 계속 정상으로 보이므로, 전류 센서 실패를
+             * 이 즉시 읽기와 SENSOR fault로 따로 드러내야 한다. */
             if (pack_sensor_init()) {
-                s_bms.sensor_ready = true;
                 if (pack_sensor_update()) {
                     DBG_I("INA226 read OK : bus=%ldmV shunt=%lduV I=%ldmA",
                           (long)pack_sensor_get_bus_mv(),
                           (long)pack_sensor_get_shunt_uv(),
                           (long)pack_sensor_get_current_ma());
-                    DBG_I("  -> 이 bus 값이 다음 초 로그의 PACK 에 나타나야 정상이다");
+                    DBG_I("  -> bus는 릴레이 바깥 EVSE측 전압; PACK은 셀 ADC B+ 값을 유지한다");
                 } else {
                     DBG_E("INA226 init 은 됐는데 주기 읽기가 실패한다");
-                    DBG_E("  -> PACK 에 보이는 값은 INA226 이 아니라 셀 ADC 합계다");
+                    DBG_E("  -> PACK 전압은 유지되지만 전류 보호 경로 실패로 SENSOR fault가 난다");
                 }
+                ap_collect();
+                ap_selfcheck();
             }
             break;
 
@@ -475,15 +636,15 @@ static void ap_console(void)
             /* 버스를 세웠으면 그 위 장치도 같이 세운다. 배선을 고친 뒤 리셋 없이
              * 바로 확인할 수 있어야 벤치에서 시행착오가 빨라진다. */
 #if (BRINGUP_S3_PACK_SENSOR == 1)
-            if (pack_sensor_init()) {
-                s_bms.sensor_ready = true;      /* SENSOR_ERR 해제 경로를 열어 준다 */
-            }
+            (void)pack_sensor_init();
 #endif
 #if (BRINGUP_S5_OLED == 1)
             if (oled_init()) {
                 bms_ui_init();
             }
 #endif
+            ap_collect();
+            ap_selfcheck();
             break;
 
         case 'k': case 'K':                     /* 셀 노드 게인 캘리브레이션 */
@@ -544,9 +705,10 @@ static void ap_console(void)
              * 값이므로, 접지에서 (여유/6) mV 만 밀려도 셀1 이 임계를 넘는다. */
             DBG_I(" OV margin %ld mV (= GND %ld mV 이동이면 트립)",
                   (long)(CFG_CELL_OV_MV - s_bms.cell_max_mv),
-                  (long)((CFG_CELL_OV_MV - s_bms.cell_max_mv) * 1000L / CFG_DIV_SCALE_X1000));
-            DBG_I(" pack %ldmV %ldmA  sensor_ready=%d",
-                  (long)s_bms.pack_mv, (long)s_bms.pack_ma, (int)s_bms.sensor_ready);
+                  (long)((CFG_CELL_OV_MV - s_bms.cell_max_mv) * 1000L / cell_adc_get_div_x1000(0)));
+            DBG_I(" pack %ldmV  evsebus %ldmV  current %ldmA  sensor_ready=%d",
+                  (long)s_bms.pack_mv, (long)s_bms.evse_bus_mv,
+                  (long)s_bms.pack_ma, (int)s_bms.sensor_ready);
             break;
 
         case 'h': case 'H':
@@ -578,7 +740,7 @@ static void ap_console(void)
  *  !! 여기서 하는 것은 존재/범위 확인뿐이고 Fault 판정은 하지 않는다.
  *     "Fault 는 bms_fault_check() 한 곳" 규칙을 깨지 않기 위해서다.
  *
- *  !! **측정 계통만 sensor_ready 를 내린다** (ADC / 셀 / 팩 센서).
+ *  !! **측정 계통만 sensor_ready 를 내린다** (ADC / 셀 / 팩 / NTC / ACS712).
  *     OLED·CAN 은 보고만 하고 게이트하지 않는다 — 표시장치가 없다고 배터리 감시를
  *     멈추는 것은 안전 방향이 반대다. CAN 두절은 이미 LINK_TIMEOUT 이 따로 잡는다.
  * ================================================================== */
@@ -628,6 +790,18 @@ static void ap_selfcheck(void)
                        (long)s_bms.cell_mv[2], (long)s_bms.cell_mv[3],
                        CFG_SELFCHK_CELL_MIN_MV, CFG_SELFCHK_CELL_MAX_MV);
         measure_ok &= ap_post("CELL", range_ok, det);
+
+        /* 포화는 셀 범위 검사만으로는 원인이 안 보인다. 복원된 값이 그냥 "높은 셀"
+         * 로 보이고, 차분 때문에 이웃 셀이 음수로 나와 오히려 그쪽을 의심하게 된다.
+         * 어느 노드가 붙었는지는 여기서만 한 줄로 드러난다. */
+        for (i = 0; i < BMS_CELL_COUNT; i++) {
+            if (cell_adc_is_railed(i)) {
+                range_ok = false;
+                DBG_E("  [FAIL] node%u ADC 포화 (raw=%u, 핀이 VDDA 이상) - 분압 하단 확인",
+                      i + 1U, cell_adc_get_raw(i));
+            }
+        }
+        measure_ok &= range_ok;
     }
 #else
     (void)ap_post("CELL", true, "(S2 OFF - SELF_CHECK 는 실패한다)");
@@ -639,32 +813,30 @@ static void ap_selfcheck(void)
 #if (BRINGUP_S3_PACK_SENSOR == 1)
     {
         bool ok = pack_sensor_is_ok() && pack_sensor_update();
-        (void)snprintf(det, sizeof(det), "%s %ld mV %ld mA (shunt %ld uV)",
+        (void)snprintf(det, sizeof(det), "%s EVSEbus %ld mV, %ld mA (shunt %ld uV)",
                        PACK_SENSOR_NAME, (long)pack_sensor_get_bus_mv(),
                        (long)pack_sensor_get_current_ma(),
                        (long)pack_sensor_get_shunt_uv());
-        measure_ok &= ap_post("PACK", ok, det);
+        measure_ok &= ap_post("CURRENT", ok, det);
     }
 #else
-    (void)ap_post("PACK", true, "(S3 OFF - pack_mv 는 셀 ADC 합계)");
+    (void)ap_post("CURRENT", true, "(S3 OFF - INA226 전류 보호 미사용)");
 #endif
 
-    /* --- NTC / ACS712 : 보고만 한다 (게이트하지 않음) ---
-     * 온도가 전부 죽어도 bms_fault_check() 가 과온 판정을 건너뛸 뿐 감시는 계속된다. */
+    /* --- NTC / ACS712 : 0.1ohm INA226의 포화 구간을 ACS712가 맡으므로 측정 게이트다. --- */
 #if (BRINGUP_S4_NTC_ACS == 1)
     {
         uint8_t n = ntc_get_valid_count();
-        (void)snprintf(det, sizeof(det), "%u/4 valid, max %ld.%ld C",
-                       n, (long)(ntc_get_temp_max_c10() / 10),
-                       (long)(ntc_get_temp_max_c10() % 10));
-        (void)ap_post("NTC", (n > 0U), det);
+        (void)snprintf(det, sizeof(det), "%u/4 valid, max %s C",
+                       n, dbg_temp(ntc_get_temp_max_c10()));
+        measure_ok &= ap_post("NTC", (n > 0U), det);
 
         (void)snprintf(det, sizeof(det), "offset %ld uV, %ld mA",
                        (long)acs712_get_offset_uv(), (long)acs712_get_ma());
-        (void)ap_post("ACS712", true, det);
+        measure_ok &= ap_post("ACS712", acs712_is_ok(), det);
     }
 #else
-    (void)ap_post("NTC/ACS", true, "(S4 OFF - temp=-999.9C, acs=0mA)");
+    (void)ap_post("NTC/ACS", true, "(S4 OFF - temp=---, acs=0mA)");
 #endif
 
     /* --- OLED / CAN : 보고 전용 --- */
@@ -706,17 +878,20 @@ void bms_app_init(void)
     bms_soc_init();
     bms_link_init();
 
-    DBG_I("--- bringup stage flags ---");
-    DBG_I("S1 LED/DBG   : %d", BRINGUP_S1_LED_DBG);
-    DBG_I("S1B ADC_RAW  : %d", BRINGUP_S1B_ADC_RAW);
-    DBG_I("S2 CELL_ADC  : %d", BRINGUP_S2_CELL_ADC);
-    DBG_I("S3 PACK SENS : %d (%s)", BRINGUP_S3_PACK_SENSOR, PACK_SENSOR_NAME);
-    DBG_I("S4 NTC/ACS   : %d", BRINGUP_S4_NTC_ACS);
-    DBG_I("S5 OLED      : %d", BRINGUP_S5_OLED);
-    DBG_I("S6 LINK      : %d", BRINGUP_S6_LINK);
-    DBG_I("S7 FSM/FAULT : %d", BRINGUP_S7_FSM_FAULT);
-    DBG_I("S8 RELAY OUT : %d%s", BRINGUP_S8_RELAY,
-          (BRINGUP_S8_RELAY == 1) ? " (PA8 LIVE - 배선 확인 완료?)" : " (출력 차단)");
+    /* 9줄로 한 줄씩 찍던 것을 2줄로 줄였다. 스위치가 전부 1 인 평상시에 9줄은
+     * 부팅 로그의 절반을 차지하면서 아무것도 알려주지 않는다. 지금 형태는
+     * **0 인 것이 눈에 띄는** 배치다 — 값을 해석할 때 정작 필요한 정보가 그것이다.
+     * (예: S3=0 이면 pack_ma 가 계속 0 이라 CHARGING 으로 못 올라간다) */
+    DBG_I("bringup  S1:%d S1B:%d S2:%d S3:%d S4:%d S5:%d S6:%d S7:%d S8:%d",
+          BRINGUP_S1_LED_DBG, BRINGUP_S1B_ADC_RAW, BRINGUP_S2_CELL_ADC,
+          BRINGUP_S3_PACK_SENSOR, BRINGUP_S4_NTC_ACS, BRINGUP_S5_OLED,
+          BRINGUP_S6_LINK, BRINGUP_S7_FSM_FAULT, BRINGUP_S8_RELAY);
+    DBG_I("         pack=cellADC(B+)  current=%s  relay PB5 %s", PACK_SENSOR_NAME,
+          (BRINGUP_S8_RELAY == 1) ? "LIVE (배선 확인 완료?)" : "출력 차단");
+#if (RELAY_STATIC_TEST_ENABLE == 1)
+    DBG_W("RELAY STATIC TEST ENABLED: command=%d (EVSE/FSM/permit bypassed)",
+          (int)s_relay_static_test_on);
+#endif
 
 #if BRINGUP_ADC_HW
     cell_adc_init();
@@ -756,6 +931,8 @@ void bms_app_init(void)
     ntc_init();
     acs712_init();
     (void)acs712_calibrate();       /* 반드시 무전류 상태에서 부팅할 것 */
+    ntc_update();
+    acs712_update();
 #endif
 
 #if (BRINGUP_S5_OLED == 1)

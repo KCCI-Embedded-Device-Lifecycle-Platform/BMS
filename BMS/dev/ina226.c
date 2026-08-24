@@ -1,6 +1,6 @@
 /**
  * @file    ina226.c
- * @brief   INA226 팩 전압/전류 측정 드라이버 (I2C)
+ * @brief   INA226 팩 전류/EVSE측 버스 전압 측정 드라이버 (I2C)
  *
  * 이 프로젝트의 팩 전류 센서는 INA226 하나다 (2026-08-14, INA219 대체 경로 제거).
  *
@@ -47,12 +47,10 @@
 /* 션트 풀스케일 +-81.92mV -> 측정 가능한 최대 전류[mA] */
 #define INA226_FS_MA        (81920L / CFG_INA226_SHUNT_MOHM)
 
-/* 션트가 과전류 임계보다 먼저 포화하면 그 fault 는 영원히 못 뜬다.
- * 값을 고르는 곳(bms_cfg.h)과 포화하는 곳(여기)이 떨어져 있어 빌드에서 못을 박는다. */
-#if (INA226_FS_MA <= CFG_OVER_CURRENT_MA)
-  #warning "INA226 shunt saturates below CFG_OVER_CURRENT_MA -- \
-over-current fault can never be measured. Replace the module shunt with 0.01ohm \
-(CFG_INA226_SHUNT_MOHM=10) or lower CFG_OVER_CURRENT_MA."
+/* 0.1ohm 션트를 유지하면 INA226 은 819mA에서 포화한다. 이 구성에서는 ACS712가
+ * 포화 이후 전류와 과전류 보호를 이어받는다. ACS 경로까지 꺼진 빌드는 안전하지 않다. */
+#if (INA226_FS_MA <= CFG_OVER_CURRENT_MA) && (BRINGUP_S4_NTC_ACS == 0)
+  #error "INA226 range is below over-current threshold; enable ACS712 fallback"
 #endif
 
 /* 버스 글리치로 죽었을 때 재설정을 몇 번까지 시도할지 (oled.c 와 같은 이유·같은 형태).
@@ -65,6 +63,7 @@ static int32_t s_shunt_uv;
 static int32_t s_current_ma;
 static bool    s_ok;
 static bool    s_sat_warned;        /* 포화 경고는 1회만 (100ms 주기 로그 폭주 방지) */
+static bool    s_saturated;
 static uint8_t s_recfg_cnt;         /* 버스 글리치 후 재설정 시도 횟수 */
 
 /**
@@ -127,6 +126,7 @@ bool ina226_init(void)
 {
     s_ok         = false;
     s_sat_warned = false;
+    s_saturated  = false;
     s_recfg_cnt  = 0U;
 
     if (!ina226_configure()) {
@@ -145,8 +145,8 @@ bool ina226_update(void)
     int16_t  sraw;
 
     /* 전송 실패 한 번으로 리셋까지 영구히 죽는 것을 막는다.
-     * 예전에는 여기서 그냥 return 했는데, 그러면 app 이 pack_mv 를 셀 ADC 합계로
-     * 그대로 두고 그 값도 그럴듯해서 "되고 있다" 로 보인다 (실제로 그렇게 지나갔다). */
+     * PACK 전압은 셀 ADC B+가 계속 제공하므로, 재시도가 없으면 INA226 전류 보호 경로만
+     * 죽은 상태가 전압 뒤에 가려진다. */
     if (!s_ok) {
         if (s_recfg_cnt >= INA226_RECFG_MAX) {
             return false;               /* 포기 (아래 경고를 이미 냈다) */
@@ -184,9 +184,10 @@ bool ina226_update(void)
     s_shunt_uv = ((int32_t)sraw * 5) / 2;
 
     /* 레일에 닿으면 측정이 아니라 클리핑이고, 과전류를 "임계 미달" 로 오판하게 된다. */
-    if (((sraw >= 32767) || (sraw <= -32768)) && !s_sat_warned) {
+    s_saturated = ((sraw >= 32760) || (sraw <= -32760));
+    if (s_saturated && !s_sat_warned) {
         s_sat_warned = true;
-        DBG_W("INA226 shunt saturated (>%ld mA) - 션트 교체 필요", (long)INA226_FS_MA);
+        DBG_W("INA226 shunt saturated (>%ldmA) -> current source ACS712", (long)INA226_FS_MA);
     }
 
     /* --- 전류 : I[mA] = V[uV] / R[mohm] --- */
@@ -199,3 +200,5 @@ int32_t ina226_get_bus_mv(void)      { return s_bus_mv; }
 int32_t ina226_get_current_ma(void)  { return s_current_ma; }
 int32_t ina226_get_shunt_uv(void)    { return s_shunt_uv; }
 bool    ina226_is_ok(void)           { return s_ok; }
+bool    ina226_is_saturated(void)    { return s_saturated; }
+int32_t ina226_get_full_scale_ma(void) { return INA226_FS_MA; }

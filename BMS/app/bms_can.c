@@ -163,7 +163,7 @@ bool bms_can_init(void)
     DBG_W("CAN NORMAL : 상대 노드가 ACK 를 줘야 송신이 성립한다.");
     DBG_W("  혼자 켜면 TEC 증가 -> Bus-Off 가 정상 (상대 연결 시 ABOM 자동 복귀)");
     DBG_W("  확인 순서 : (1) Rs 핀 GND  (2) VCC 3.3V  (3) CANH-CANL 60ohm  (4) 공통 GND");
-    DBG_I("  console : t=frame trace  e=EVSE role  (1초마다 CAN 요약 로그)");
+    DBG_I("  console : t=frame trace  (1초마다 CAN 요약 로그가 자동으로 나온다)");
     return true;
 }
 
@@ -316,23 +316,35 @@ static void bms_can_dispatch(uint16_t id, const uint8_t *p_d, uint8_t dlc)
     switch (id) {
 
     case CFG_CAN_ID_EVSE_STATUS:            /* 하트비트 겸용, DLC 4 */
+        if (dlc != 4U) {
+            s_rx_drop++;
+            break;
+        }
         bms_fault_notify_link();
-        s_evse_relay_on  = (dlc > 1U) && (p_d[1] != 0U);
-        s_evse_connected = (dlc > 2U) && (p_d[2] != 0U);
+        s_evse_relay_on  = (p_d[1] != 0U);
+        s_evse_connected = (p_d[2] != 0U);
         /* E-Stop 은 정보가 없으면 "안 눌림" 으로 본다. 반대로 두면 DLC 가 짧은 구형
          * 프레임을 비상정지로 오인해 충전이 영구히 막힌다. 진짜 비상정지의 1차 방어선은
          * EVSE 자기 릴레이이고, 여기는 BMS 릴레이를 같이 여는 2차 방어선이다. */
-        s_evse_estop     = (dlc > 3U) && (p_d[3] != 0U);
+        s_evse_estop     = (p_d[3] != 0U);
         break;
 
     case CFG_CAN_ID_EVSE_CHARGE_REQ:
+        if (dlc != 1U) {
+            s_rx_drop++;
+            break;
+        }
         bms_fault_notify_link();
-        s_evse_charge_req = (dlc > 0U) && (p_d[0] != 0U);
+        s_evse_charge_req = (p_d[0] != 0U);
         break;
 
     case CFG_CAN_ID_EVSE_FAULT:             /* 표시/로그용 */
+        if (dlc != 1U) {
+            s_rx_drop++;
+            break;
+        }
         bms_fault_notify_link();
-        s_evse_fault = (dlc > 0U) ? p_d[0] : 0U;
+        s_evse_fault = p_d[0];
         break;
 
     case CFG_CAN_ID_BMS_OTA_ENTER:

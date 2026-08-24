@@ -107,9 +107,8 @@ int32_t bms_fault_set_ot_threshold(int32_t c10)
     s_th_over_temp_c10     = CLAMP(c10, CFG_OT_LIMIT_MIN_C10, CFG_OT_LIMIT_MAX_C10);
     s_th_over_temp_clr_c10 = s_th_over_temp_c10 - CFG_OT_HYSTERESIS_C10;
 
-    DBG_W("OT threshold -> %ld.%ld C (req %ld.%ld)",
-          (long)(s_th_over_temp_c10 / 10), (long)(s_th_over_temp_c10 % 10),
-          (long)(c10 / 10), (long)(c10 % 10));
+    DBG_W("OT threshold -> %s C (req %s)",
+          dbg_temp(s_th_over_temp_c10), dbg_temp(c10));
     return s_th_over_temp_c10;
 }
 
@@ -160,8 +159,12 @@ void bms_fault_check(bms_data_t *p_d)
 
     /* ---------- 5) 센서 크로스체크 (션트 vs 홀) ---------- */
     diff = ABS_DIFF(p_d->pack_ma, p_d->acs_ma);
-    fault_eval(5, (!p_d->sensor_ready) || (diff > CFG_SENSOR_DIFF_MA),
-                  (p_d->sensor_ready)  && (diff < (CFG_SENSOR_DIFF_MA / 2)),
+    /* INA226 포화 구간에서는 pack_ma 자체가 ACS712로 대체되므로 두 센서의
+     * 불일치 비교는 의미가 없다. 포화는 정상적인 역할 전환이고 과전류는 위에서 잡는다. */
+    fault_eval(5, (!p_d->sensor_ready) ||
+                  (!p_d->pack_current_saturated && (diff > CFG_SENSOR_DIFF_MA)),
+                  (p_d->sensor_ready) &&
+                  (p_d->pack_current_saturated || (diff < (CFG_SENSOR_DIFF_MA / 2))),
                   CFG_FAULT_CLEAR_HOLD_MS, &flt, BMS_FLT_SENSOR_ERR);
 
     /* ---------- 6) 통신 두절 ----------

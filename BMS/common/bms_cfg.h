@@ -40,6 +40,17 @@
   #define CFG_OVER_CURRENT_MA           2000
 #endif
 
+/* --- SOC 쿨롱 카운팅 ---
+ * 최초 SOC 는 셀 평균 OCV 로 정하고, 이후에는 팩 전류(+충전/-방전)를 1초마다 적분한다.
+ * 데모 모드는 퍼센트 변화를 짧은 시연에서도 볼 수 있도록 작은 가상 용량을 쓴다.
+ * 실사용 전에는 CFG_BATTERY_CAPACITY_MAH 를 실제 팩 정격 용량으로 반드시 맞출 것. */
+#if (CFG_DEMO_MODE == 1)
+  #define CFG_BATTERY_CAPACITY_MAH      50L         /* 500mA 충전 시 약 3.6초마다 +1% */
+#else
+  #define CFG_BATTERY_CAPACITY_MAH      2000L       /* 실사용 팩 정격 용량에 맞춰 변경 */
+#endif
+#define CFG_SOC_REST_CURRENT_MA         30L         /* 이 이하면 무부하 OCV 로 천천히 보정 */
+
 /* Fault 진입 확정 횟수 (100ms x N). 3 = 300ms — ADC 노이즈 1회로 충전이 끊기는 것을 막는다.
  * "임계 초과 후 100ms 이내 permit=0" 을 엄격히 시연해야 하면 1 로 낮춘다. */
 #define CFG_FAULT_CONFIRM_CNT           3U
@@ -69,12 +80,36 @@
 /* ==================================================================
  * 2. 하드웨어 상수
  * ================================================================== */
-/* --- 셀 전압 분압기 : 100k(상단) + 20k(하단) --> 1/6 --- */
+/* --- 셀 전압 분압기 : 노드마다 따로 둔다 ---
+ *
+ *      Node_n ---[R_top]---+---[R_bot]--- GND
+ *                          |
+ *                         ADC        복원 배율 = (R_top + R_bot) / R_bot
+ *
+ * 한 상수로 4채널을 덮지 않는 이유: 한 노드에만 다른 저항이 꽂히면 그 노드의 배율만
+ * 달라지는데, 단일 상수로는 그것을 코드로 표현할 방법이 없다. 게다가 셀 전압이 노드의
+ * 차분이라 오염이 그 셀에서 끝나지 않고 이웃 셀까지 반대 부호로 번진다
+ * (실제 사례: node3 배율만 어긋나서 cell3=+10.4V / cell4=-2.3V 로 나왔다).
+ *
+ * gain_q16 캘리브레이션으로 흡수하면 안 된다. 그쪽은 저항 공차 수준의 잔차 보정용이라
+ * +-25% 가드레일이 걸려 있고, 그 가드레일이 곧 "배선/부품이 다르다" 를 잡아내는 센서다.
+ * -> "실제로 꽂힌 저항" 은 여기, "그 뒤에 남는 수 %" 는 게인. 두 축을 섞지 않는다.
+ *
+ * 실제 배율을 모를 때는 콘솔 'k' 로 DMM 실측값을 넣는다. +-25% 밖이면 적용을 거부하는
+ * 대신 그 노드의 실측 분압비를 찍어 주므로, 그 값을 아래 표에 옮겨 적으면 된다. */
+#define CFG_DIV_SCALE(top, bot)         ((((top) + (bot)) * 1000L) / (bot))
+
 #define CFG_DIV_R_TOP_OHM               100000L
 #define CFG_DIV_R_BOT_OHM               20000L
-/* 복원 배율을 x1000 스케일 정수로 보관 (6.000 -> 6000) */
-#define CFG_DIV_SCALE_X1000             (((CFG_DIV_R_TOP_OHM + CFG_DIV_R_BOT_OHM) * 1000L) \
-                                          / CFG_DIV_R_BOT_OHM)
+
+/* 노드 순서 = B1(PA0/IN0) / B2(PA1/IN1) / B3(PA4/IN4) / B+(PB0/IN8).
+ * x1000 스케일 정수 (6.000 -> 6000). 배율이 다른 노드는 그 줄만 고친다. */
+#define CFG_DIV_SCALE_X1000_LIST { \
+    CFG_DIV_SCALE(CFG_DIV_R_TOP_OHM, CFG_DIV_R_BOT_OHM),  /* node1 B1 : PA0 */ \
+    CFG_DIV_SCALE(CFG_DIV_R_TOP_OHM, CFG_DIV_R_BOT_OHM),  /* node2 B2 : PA1 */ \
+    CFG_DIV_SCALE(CFG_DIV_R_TOP_OHM, CFG_DIV_R_BOT_OHM),  /* node3 B3 : PA4 */ \
+    CFG_DIV_SCALE(CFG_DIV_R_TOP_OHM, CFG_DIV_R_BOT_OHM)   /* node4 B+ : PB0 */ \
+}
 
 /* --- ADC --- */
 #define CFG_ADC_FULL_SCALE              4095L       /* 12bit */
@@ -84,7 +119,9 @@
 #define CFG_VREFINT_CAL_ADDR            ((uint16_t *)0x1FFF7A2AUL)
 #define CFG_VREFINT_CAL_VDDA_MV         3300L       /* 캘리브레이션 시 VDDA */
 
-/* --- 팩 전압/전류 센서 : INA226 (I2C) ---
+/* --- 팩 전류/EVSE측 버스 전압 센서 : INA226 (I2C) ---
+ * 실물 순서는 EVSE -> INA226 -> ACS712 -> 릴레이 -> 배터리다. 따라서 INA226 Bus Voltage는
+ * 배터리 PACK이 아니라 EVSE측 전압이고, PACK 전압은 셀 ADC의 B+ 노드를 사용한다.
  * 2026-08-14 에 모듈이 입고되어 대체 부품(INA219) 경로를 제거했다.
  * 컴파일 타임 선택(CFG_PACK_SENSOR)도 같이 없앴다 — 고를 것이 하나뿐인 스위치는
  * "고를 수 있다" 는 착각만 남기고 실제로는 검증되지 않는 분기가 된다.
@@ -95,16 +132,14 @@
  *    "션트 값 = 측정 범위" 이고, 이것이 이 칩의 유일한 함정이다:
  *      0.1옴 (모듈 기본 R100) -> +-819mA   <- 과전류 임계 1A 를 아예 못 잰다
  *      0.01옴 (교체품)        -> +-8.19A
- *    포화는 런타임에 "전류가 안 올라가네" 로만 보이므로, ina226.c 가 이 값과
- *    CFG_OVER_CURRENT_MA 를 비교해 빌드에서 #warning 으로 잡는다.
- *    경고가 뜨면 임계값을 낮추지 말고 션트를 바꿀 것 (임계를 낮추면 실팩에서 무의미하다).
+ *    이 프로젝트는 0.1옴 션트를 유지한다. INA226은 포화 전 정밀 계측을 맡고,
+ *    포화 이후에는 ACS712가 pack_ma와 과전류 보호를 이어받는다. ACS712 경로를 끄면
+ *    ina226.c가 빌드를 막아 보호 공백이 생기지 않게 한다.
  *
  * 분해능은 션트 LSB 2.5uV / 버스 LSB 1.25mV + 하드웨어 평균(AVG=16회)이라
  * 이 프로젝트 임계값(500mA/1000mA, 16.8V)에는 여유가 충분하다.
  *
- * OLED(0x3C)와 같은 I2C1 버스지만 주소가 달라 충돌은 없다.
- * 풀업 4.7k 는 버스에 한 쌍만 남길 것 — 두 모듈에 다 붙어 있으면 2.35k 가 되어
- * 상승엣지가 뭉개진다. */
+ * OLED는 I2C3로 분리되어 있다. 각 버스에 모듈 하나와 온보드 풀업 한 쌍을 둔다. */
 #define CFG_INA226_I2C_ADDR             0x40U       /* 7bit (A1/A0 = GND) */
 #define CFG_INA226_SHUNT_MOHM           100L        /* 모듈 기본 R100. 0.01ohm 교체 시 10 */
 
@@ -127,17 +162,38 @@
 #define CFG_NTC_R25_OHM                 10000L
 /* B값은 LUT 에 이미 반영되어 있음 (B3950) */
 
-/* --- ACS712-05B + 레벨시프트(10k 상단 / 20k 하단 = x2/3) --- */
+/* --- ACS712-05B : 실물은 OUT 을 PC2 에 **직결**했다 (레벨시프트 없음) ---
+ *
+ * 원 설계는 10k 상단 / 20k 하단으로 x2/3 감쇠 후 입력하고 여기서 3/2 로 복원하는 것이었다.
+ * 그러나 실제 조립은 분압기 없이 납땜이 끝났고 되돌릴 수 없다 -> 복원 배율을 1/1 로 둔다.
+ *
+ * 이 값을 3/2 로 되돌려 놓으면 전류가 1.5배로 읽히고, 그 오차가 그대로
+ * |acs_ma - pack_ma| 에 실려서 실전류 1A 근처부터 CFG_SENSOR_DIFF_MA 를 넘긴다.
+ * = 멀쩡한 상태에서 BMS_FLT_SENSOR_ERR 로 permit 이 0 이 된다.
+ * **분압기를 실제로 다는 날에만 3/2 로 되돌릴 것.**
+ *
+ * 직결의 대가 두 가지 (둘 다 감수하고 가는 것이지 모르고 두는 것이 아니다):
+ *  1) 핀 전압 = 센서 출력 그대로라 VDDA(약 3.29V)를 넘는 +4A 부근부터 ADC 가 포화한다.
+ *     팩 센서(INA226)가 션트 0.1옴에서 이미 ±819mA 로 포화하므로 실사용 범위에는 안 닿는다.
+ *  2) 5V 는 살아 있는데 STM32 의 3.3V 가 죽은 순간(리셋/USB 분리/별도 5V 어댑터),
+ *     센서 출력이 직렬 저항 없이 PC2 의 보호 다이오드로 흘러든다.
+ *     -> ACS712 VCC 는 반드시 **Nucleo 의 5V 핀**에서 뽑아 두 레일이 같이 뜨고 지게 할 것.
+ *        별도 어댑터로 먹이면 이 구성은 언젠가 핀을 태운다. */
 #define CFG_ACS712_SENS_UV_PER_A        185000L     /* 185 mV/A */
-#define CFG_ACS712_DIV_NUM              3L          /* 복원 배율 3/2 */
-#define CFG_ACS712_DIV_DEN              2L
+#define CFG_ACS712_DIV_NUM              1L          /* 직결 = 복원 배율 1/1 */
+#define CFG_ACS712_DIV_DEN              1L
 #define CFG_ACS712_CAL_SAMPLES          32U         /* 무전류 오프셋 캘리 횟수 */
+#define CFG_ACS712_OFFSET_TOL_MV        500L        /* 기대 오프셋 허용 오차 */
+
+/* 무전류 오프셋의 기대값 [mV]. 분압기가 있으면 VCC/2 x 2/3 = 1650, 직결이면 VCC/2 = 2500.
+ * 로그의 기대값이 실물과 다르면 "정상인데 틀려 보이는" 줄이 하나 늘 뿐이라 같이 옮긴다. */
+#define CFG_ACS712_OFFSET_EXPECT_MV     2500L
 
 /* --- OLED (SSD1306 128x64, I2C 전용) ---
  * 최종 부품(ELB200168)이 I2C 4핀 전용이라 .ioc 에서 SPI2 를 내렸다 (그 자리에 PA8 릴레이).
  *
- * 대가는 flush 시간 : 8페이지 x 129byte x 9bit / 400kHz = 약 23ms 블로킹이고,
- * 같은 I2C1 을 쓰는 팩 센서 읽기도 그동안 밀린다.
+ * 대가는 flush 시간 : 8페이지 x 129byte x 9bit / 400kHz = 약 23ms 블로킹이다.
+ * 팩 센서는 별도 I2C1이라 버스는 막지 않지만 super-loop 실행 시간에는 포함된다.
  * -> OLED 는 500ms 슬롯에만 둔다. "Fault 후 100ms 내 permit=0" 이 걸린 100ms 슬롯에
  *    절대 넣지 말 것.
  *

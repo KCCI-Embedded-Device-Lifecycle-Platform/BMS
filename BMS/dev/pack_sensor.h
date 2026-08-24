@@ -1,8 +1,11 @@
 /**
  * @file    pack_sensor.h
- * @brief   팩 전압/전류 센서 추상화 계층 (현재 INA226)
+ * @brief   팩 전류/EVSE측 버스 전압 센서 추상화 계층 (현재 INA226)
+ * @note    현재 실물 순서는 EVSE -> INA226 -> ACS712 -> 릴레이 -> 배터리다.
+ *          따라서 Bus Voltage는 배터리 PACK이 아니라 릴레이 바깥 EVSE측 전압이며,
+ *          배터리 PACK 전압은 cell_adc의 B+ 노드를 사용한다.
  *
- * @note    app 계층은 칩 이름을 몰라야 한다. 부품이 바뀌어도 고치는 곳은 bms_app.c 가
+ *          app 계층은 칩 이름을 몰라야 한다. 부품이 바뀌어도 고치는 곳은 bms_app.c 가
  *          아니라 이 헤더 하나다.
  *          (헤더 전용 inline 이라 계층이 하나 늘어도 코드는 늘지 않는다)
  *
@@ -26,6 +29,8 @@ static inline bool    pack_sensor_update(void)          { return ina226_update()
 static inline int32_t pack_sensor_get_bus_mv(void)      { return ina226_get_bus_mv(); }
 static inline int32_t pack_sensor_get_current_ma(void)  { return ina226_get_current_ma(); }
 static inline bool    pack_sensor_is_ok(void)           { return ina226_is_ok(); }
+static inline bool    pack_sensor_is_saturated(void)    { return ina226_is_saturated(); }
+static inline int32_t pack_sensor_get_full_scale_ma(void) { return ina226_get_full_scale_ma(); }
 /* 원값(션트 전압). 전류가 0 으로 보일 때 "정말 안 흐른다" 와 "값이 안 들어온다" 를
  * 가르는 유일한 창구다 — 계산된 mA 만으로는 둘이 똑같이 0 이다. */
 static inline int32_t pack_sensor_get_shunt_uv(void)    { return ina226_get_shunt_uv(); }

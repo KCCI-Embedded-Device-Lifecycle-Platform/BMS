@@ -64,7 +64,8 @@ void bms_fsm_run(bms_data_t *p_d)
     /* 하트비트가 온다는 것과 충전을 요청했다는 것은 다른 사실이다.
      * link_ok 만 보면 EVSE 가 "충전 안 함(0x201=0)" 을 보내는 동안에도 permit=1 을 뿌린다.
      * E-Stop 은 그 위에서 무조건 이긴다. */
-    bool evse_wants_charge = p_d->evse_charge_req && !p_d->evse_estop;
+    bool evse_wants_charge = p_d->evse_charge_req && p_d->evse_connected &&
+                             !p_d->evse_estop;
 
     switch (s_state) {
 

@@ -25,6 +25,7 @@ static volatile uint32_t s_acc[ADC_IDX_MAX];
 static volatile uint16_t s_avg[ADC_IDX_MAX];
 static volatile uint8_t  s_acc_cnt;
 static volatile bool     s_ready;
+static volatile uint32_t s_last_avg_ms;
 
 bool hw_adc_init(void)
 {
@@ -36,6 +37,7 @@ bool hw_adc_init(void)
     }
     s_acc_cnt = 0;
     s_ready   = false;
+    s_last_avg_ms = 0U;
 
     /* Vrefint 채널은 ADC_CCR 의 TSVREFE 로 별도 인에이블이 필요하다.
      * CubeMX 가 켜 주지만 명시적으로 한 번 더 보장한다. */
@@ -60,6 +62,11 @@ bool hw_adc_init(void)
 bool hw_adc_is_ready(void)
 {
     return s_ready;
+}
+
+bool hw_adc_is_fresh(uint32_t max_age_ms)
+{
+    return s_ready && ((uint32_t)(HAL_GetTick() - s_last_avg_ms) <= max_age_ms);
 }
 
 void hw_adc_snapshot(uint16_t *p_out)
@@ -139,6 +146,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
             s_acc[i] = 0;
         }
         s_acc_cnt = 0;
+        s_last_avg_ms = HAL_GetTick();
         s_ready   = true;
     }
 }
@@ -152,6 +160,7 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1) {
+        s_ready = false;
         DBG_E("ADC error 0x%lX", (unsigned long)HAL_ADC_GetError(hadc));
     }
 }

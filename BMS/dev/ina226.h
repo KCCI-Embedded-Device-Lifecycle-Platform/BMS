@@ -23,4 +23,6 @@ int32_t ina226_get_bus_mv(void);
 int32_t ina226_get_current_ma(void);    /* + 충전 / - 방전 */
 int32_t ina226_get_shunt_uv(void);
 bool    ina226_is_ok(void);
+bool    ina226_is_saturated(void);
+int32_t ina226_get_full_scale_ma(void);
 #endif

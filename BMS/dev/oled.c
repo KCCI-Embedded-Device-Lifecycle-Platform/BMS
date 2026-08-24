@@ -9,8 +9,8 @@
  * @note  I2C 전용이다 ([제어바이트][페이로드] 한 트랜잭션, 주소 0x3C, 모듈에 따라 0x3D).
  *        SPI 경로는 삭제했다 — 최종 부품(ELB200168)이 I2C 4핀 전용이라 .ioc 에서 SPI2 를
  *        내렸고, HAL_SPI_MODULE_ENABLED 조차 꺼져 코드만 복원하면 빌드가 깨진다.
- *        대가로 팩 센서와 I2C1 을 공유하므로 flush 약 23ms 동안 센서 읽기가 밀린다
- *        -> OLED 는 500ms 슬롯 전용이다.
+ *        I2C3 전용 버스라 팩 센서 I2C1을 막지는 않지만 flush 약 23ms 동안
+ *        super-loop가 블로킹되므로 OLED는 500ms 슬롯 전용이다.
  *        화면이 좌우로 2픽셀 밀려 보이면 SH1106 이므로 CFG_OLED_COL_OFFSET 을 2 로 바꾼다.
  */
 #include "oled.h"
@@ -150,7 +150,7 @@ bool oled_init(void)
     s_ok = true;
     oled_clear();
     oled_flush();
-    DBG_I("OLED ok (SSD1306 128x64, I2C1 @0x%02X)", CFG_OLED_I2C_ADDR);
+    DBG_I("OLED ok (SSD1306 128x64, I2C3 @0x%02X)", CFG_OLED_I2C_ADDR);
     return true;
 }
 

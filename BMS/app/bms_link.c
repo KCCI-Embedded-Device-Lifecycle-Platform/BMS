@@ -90,10 +90,12 @@ void bms_link_send_cell(const bms_data_t *p_d)
     uint8_t i;
     int32_t mv;
 
-    /* 0x101 : Cell1~4 전압 (mV, LE) - 8바이트에 딱 맞는다 */
+    /* 0x101 : Cell1~4 전압 (int16 mV, LE).
+     * 음수는 실제 셀 전압이 아니라 노드 배선/보정 이상을 찾는 진단값이므로
+     * 0으로 숨기지 않고 EVSE 에 그대로 전달한다. */
     for (i = 0; i < BMS_CELL_COUNT; i++) {
-        mv = CLAMP(p_d->cell_mv[i], 0, 65535);
-        pack_u16_le(&d[i * 2U], (uint16_t)mv);
+        mv = CLAMP(p_d->cell_mv[i], -32768, 32767);
+        pack_u16_le(&d[i * 2U], (uint16_t)(int16_t)mv);
     }
     link_send_frame(CFG_CAN_ID_CELL, d, 8);
 
@@ -104,8 +106,8 @@ void bms_link_send_cell(const bms_data_t *p_d)
         uint8_t t[8];
         pack_u16_le(&t[0], (uint16_t)(int16_t)CLAMP(p_d->temp_c10, -32768, 32767));
         pack_u16_le(&t[2], (uint16_t)CLAMP(p_d->imbalance_mv, 0, 65535));
-        pack_u16_le(&t[4], (uint16_t)CLAMP(p_d->cell_min_mv,  0, 65535));
-        pack_u16_le(&t[6], (uint16_t)CLAMP(p_d->cell_max_mv,  0, 65535));
+        pack_u16_le(&t[4], (uint16_t)(int16_t)CLAMP(p_d->cell_min_mv, -32768, 32767));
+        pack_u16_le(&t[6], (uint16_t)(int16_t)CLAMP(p_d->cell_max_mv, -32768, 32767));
         link_send_frame(CFG_CAN_ID_TEMP, t, 8);
     }
 }

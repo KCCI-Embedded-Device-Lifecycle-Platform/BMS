@@ -25,6 +25,7 @@ typedef enum {
 
 bool     hw_adc_init(void);
 bool     hw_adc_is_ready(void);                 /* 첫 평균 완료 여부 */
+bool     hw_adc_is_fresh(uint32_t max_age_ms);  /* DMA 평균이 최근에도 갱신됐는가 */
 void     hw_adc_snapshot(uint16_t *p_out);      /* ADC_IDX_MAX 개 원자적 복사 */
 uint16_t hw_adc_get_raw(adc_idx_t idx);
 int32_t  hw_adc_get_vdda_mv(void);              /* Vrefint 기반 실측 VDDA */

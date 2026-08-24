@@ -70,8 +70,9 @@ typedef struct {
     /* --- 측정값 --- */
     int32_t     node_mv[BMS_CELL_COUNT];    /* B1,B2,B3,B+ 누적 전압 */
     int32_t     cell_mv[BMS_CELL_COUNT];    /* 차분한 셀별 전압      */
-    int32_t     pack_mv;                    /* 팩 센서 Bus Voltage   */
-    int32_t     pack_ma;                    /* 팩 센서 션트 전류     */
+    int32_t     pack_mv;                    /* 셀 ADC B+ 기반 배터리 팩 전압 */
+    int32_t     evse_bus_mv;                /* INA226 EVSE측 Bus Voltage    */
+    int32_t     pack_ma;                    /* INA226 션트 전류              */
     int32_t     acs_ma;                     /* ACS712 홀 전류(대조)  */
     int32_t     temp_c10;                   /* NTC 온도 0.1C         */
     int32_t     vdda_mv;                    /* Vrefint 로 실측한 VDDA*/
@@ -96,7 +97,8 @@ typedef struct {
     bms_state_t state;
     bool        charge_permit;
     bool        sensor_ready;               /* dev 초기화 성공 여부   */
-    bool        relay_on;                   /* PA8 충전 차단 릴레이 현재 지령 */
+    bool        pack_current_saturated;     /* INA226 포화 -> ACS712 전류 채택 */
+    bool        relay_on;                   /* PB5 충전 차단 릴레이 현재 지령 */
 } bms_data_t;
 
 #endif /* __BMS_TYPES_H_ */
