@@ -163,7 +163,7 @@ static void ap_collect(void)
  *    dTEC 가 같이 튐        -> 교란이 CAN 차동버스까지 갔다. 셀 ADC 와 CAN 은
  *                             서로 무관한 두 계통이라 공통분모는 접지뿐이다.
  * ================================================================== */
-#define RLYW_SLOTS      12U     /* 100ms x 12 = 1.2s. 닫힘->트립(300ms)->열림->복귀를 덮는다 */
+#define RLYW_SLOTS       4U     /* 100ms x 4 = 0.4s. 개폐 직후의 초기 변화만 기록 */
 
 static uint8_t  s_rlyw_left;                    /* 남은 출력 슬롯 (0 = 창 닫힘) */
 static int32_t  s_rlyw_base[BMS_CELL_COUNT];    /* 릴레이가 열려 있던 마지막 노드값 */

@@ -51,6 +51,11 @@
 #endif
 #define CFG_SOC_REST_CURRENT_MA         30L         /* 이 이하면 무부하 OCV 로 천천히 보정 */
 
+/* --- 충전 상태 판정 ---
+ * Start 요청 후 릴레이/출력이 안정될 시간만 CHARGE_READY 를 유지한 다음
+ * CHARGING 으로 간다. CHARGING 진입 후에는 Stop·연결 해제·Fault 까지 유지한다. */
+#define CFG_CHARGE_READY_HOLD_MS        1000U
+
 /* Fault 진입 확정 횟수 (100ms x N). 3 = 300ms — ADC 노이즈 1회로 충전이 끊기는 것을 막는다.
  * "임계 초과 후 100ms 이내 permit=0" 을 엄격히 시연해야 하면 1 로 낮춘다. */
 #define CFG_FAULT_CONFIRM_CNT           3U

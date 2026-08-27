@@ -5,8 +5,8 @@
  *   [INIT] -> [SELF_CHECK] -> 센서 정상 -> [IDLE]
  *                          -> 센서 이상 -> [FAULT]
  *   [IDLE]         -> permit && link_ok && EVSE 충전 요청 -> [CHARGE_READY]
- *   [CHARGE_READY] -> 충전 전류 감지 -> [CHARGING]   / 요청 취소·링크 끊김 -> [IDLE]
- *   [CHARGING]     -> 요청 취소 또는 전류 소멸 -> [IDLE]
+ *   [CHARGE_READY] -> 1초 경과 -> [CHARGING]   / 요청 취소·링크 끊김 -> [IDLE]
+ *   [CHARGING]     -> 요청 취소·연결 해제 -> [IDLE]
  *   어느 상태든 critical Fault -> [FAULT],  Fault 전부 해제 -> [IDLE]
  *
  * charge_permit 는 FAULT 진입 순간 무조건 0 이다 (entry action 에서 강제).
@@ -15,12 +15,11 @@
  */
 #include "bms_state.h"
 #include "bms_fault.h"
+#include "hw_tick.h"
 #include "dbg.h"
 
-#define CHARGE_DETECT_MA        100     /* 이 이상 흐르면 충전 중으로 간주 */
-#define CHARGE_STOP_MA          30
-
 static bms_state_t s_state;
+static uint32_t    s_charge_ready_since;
 
 static void fsm_enter(bms_data_t *p_d, bms_state_t next)
 {
@@ -40,6 +39,9 @@ static void fsm_enter(bms_data_t *p_d, bms_state_t next)
         p_d->charge_permit = false;     /* default closed */
         break;
     case BMS_ST_CHARGE_READY:
+        s_charge_ready_since = hw_tick_ms();
+        /* permit 은 bms_fault_check() 결과를 그대로 따른다 */
+        break;
     case BMS_ST_CHARGING:
         /* permit 은 bms_fault_check() 결과를 그대로 따른다 */
         break;
@@ -52,6 +54,7 @@ static void fsm_enter(bms_data_t *p_d, bms_state_t next)
 void bms_fsm_init(bms_data_t *p_d)
 {
     s_state = BMS_ST_INIT;
+    s_charge_ready_since = 0U;
     p_d->state         = BMS_ST_INIT;
     p_d->charge_permit = false;
 }
@@ -105,21 +108,18 @@ void bms_fsm_run(bms_data_t *p_d)
     case BMS_ST_CHARGE_READY:
         if (critical) {
             fsm_enter(p_d, BMS_ST_FAULT);
-        } else if (p_d->pack_ma > CHARGE_DETECT_MA) {
-            fsm_enter(p_d, BMS_ST_CHARGING);
         } else if (!link_ok || !evse_wants_charge) {
             fsm_enter(p_d, BMS_ST_IDLE);
+        } else if (hw_tick_elapsed(s_charge_ready_since, CFG_CHARGE_READY_HOLD_MS)) {
+            fsm_enter(p_d, BMS_ST_CHARGING);
         }
         break;
 
     case BMS_ST_CHARGING:
         if (critical) {
             fsm_enter(p_d, BMS_ST_FAULT);
-        } else if (!evse_wants_charge) {
-            /* 중지 요청 또는 비상정지. 전류가 남아 있어도 즉시 IDLE 로 내려간다 —
-             * CHARGE_STOP_MA 아래로 떨어지기를 기다리면 그동안 릴레이가 붙어 있게 된다. */
-            fsm_enter(p_d, BMS_ST_IDLE);
-        } else if (p_d->pack_ma < CHARGE_STOP_MA) {
+        } else if (!link_ok || !evse_wants_charge) {
+            /* Stop·연결 해제·E-Stop 은 전류 크기와 관계없이 즉시 IDLE 로 간다. */
             fsm_enter(p_d, BMS_ST_IDLE);
         }
         break;
